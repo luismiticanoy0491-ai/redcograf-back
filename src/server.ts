@@ -1,9 +1,6 @@
 import dotenv from "dotenv";
-dotenv.config();
-
 import express from "express";
 import cors from "cors";
-
 import productos from "./routes/productos";
 import ventas from "./routes/ventas";
 import borradores from "./routes/borradores";
@@ -20,6 +17,8 @@ import ai from "./routes/ai";
 import auth from "./routes/auth";
 import separados from "./routes/separados";
 import pagosSaaS from "./routes/pagosSaaS";
+
+dotenv.config();
 
 const app = express();
 
