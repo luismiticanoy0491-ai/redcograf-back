@@ -24,7 +24,14 @@ router.get("/predicciones", async (req, res) => {
     const [rows] = await promiseDb.query(query);
 
     // 2. Procesar y normalizar los datos para cada producto específico
-    const authData = {};
+    const authData: Record<string, {
+      id: number;
+      nombre: string;
+      categoria: string;
+      stock_actual: number;
+      historia: { mes: string; cantidad: number }[];
+      sum_ventas: number;
+    }> = {};
     rows.forEach(row => {
       const { producto_id, nombre, categoria, stock_actual, mes, total_vendido } = row;
       if (!authData[producto_id]) {
@@ -36,7 +43,7 @@ router.get("/predicciones", async (req, res) => {
 
     // 3. Motor Estadístico - Ponderaciones de Inventario
     const recomendaciones = [];
-    const graficaMensual = {};
+    const graficaMensual: Record<string, { mes: string; total_unidades_reales: number; prediccion_proyectada?: number }> = {};
 
     Object.values(authData).forEach(prod => {
       // Sumar los volúmenes globales para el gráfico macroscópico del negocio
@@ -96,7 +103,9 @@ router.get("/predicciones", async (req, res) => {
     recomendaciones.sort((a, b) => b.sugerencia_compra - a.sugerencia_compra);
 
     // 4. Interpolación de la Gráfica Visual Predictiva (Macro)
-    let dataGrafica = Object.values(graficaMensual).sort((a, b) => a.mes.localeCompare(b.mes));
+    const graficaType = { mes: "", total_unidades_reales: 0, prediccion_proyectada: 0 };
+    type GraficaType = typeof graficaType;
+    let dataGrafica: (GraficaType | { mes: string; total_unidades_reales: number; prediccion_proyectada?: number })[] = Object.values(graficaMensual).sort((a, b) => a.mes.localeCompare(b.mes));
     const sumaPrediccionesGlobales = recomendaciones.reduce((acc, curr) => acc + curr.prediccion_proximo_mes, 0);
     
     if (dataGrafica.length > 0) {
@@ -111,7 +120,7 @@ router.get("/predicciones", async (req, res) => {
       
       dataGrafica.push({
         mes: nextMonthStr,
-        // No hay unidades reales en el futuro, sólo trazamos la predicción calculada globalmente
+        total_unidades_reales: 0,
         prediccion_proyectada: sumaPrediccionesGlobales
       });
     }

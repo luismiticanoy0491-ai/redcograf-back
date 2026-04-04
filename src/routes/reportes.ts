@@ -4,7 +4,17 @@ const connection = require("../conection");
 
 router.get("/dashboard", (req, res) => {
   const { cajeroId, categoria, startDate, endDate } = req.query;
-  const reportes = {};
+  const reportes: {
+    general: any;
+    topProductos: any;
+    rendimientoCajeros: any;
+    ingresosCategorias: any;
+  } = {
+    general: null,
+    topProductos: null,
+    rendimientoCajeros: null,
+    ingresosCategorias: null
+  };
 
   let whereClauses = ["1=1"];
   let params = [];

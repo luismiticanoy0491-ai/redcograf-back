@@ -52,7 +52,7 @@ router.get("/", (req, res) => {
             nombre: cajero.nombre,
             documento: cajero.documento,
             salario_base,
-            total_ventas,
+            totalVentas,
             porcentaje_comision: cajero.porcentaje_comision,
             comisiones,
             total_a_pagar,
