@@ -1,5 +1,5 @@
-const connection = require('./conection');
-const bcrypt = require('bcryptjs');
+import connection from './conection';
+import bcrypt from 'bcryptjs';
 
 const createTableQuery = `
   CREATE TABLE IF NOT EXISTS administradores (
@@ -20,7 +20,7 @@ connection.query(createTableQuery, async (err) => {
   console.log("Tabla 'administradores' verificada/creada.");
 
   // Verificar si ya existe el usuario 'admin'
-  connection.query("SELECT * FROM administradores WHERE username = 'admin'", async (err, results) => {
+  connection.query("SELECT * FROM administradores WHERE username = 'admin'", async (err: any, results: any[]) => {
     if (err) {
       console.error("Error verificando usuario admin:", err);
       process.exit(1);
@@ -47,5 +47,3 @@ connection.query(createTableQuery, async (err) => {
   });
 });
 
-
-export {};

@@ -1,7 +1,9 @@
-const express = require("express");
+import express from "express";
+import connection from "../conection";
+import crypto from "crypto";
+import { verifyTokenAndTenant } from "../middlewares/authMiddleware";
+
 const router = express.Router();
-const connection = require("../conection");
-const crypto = require("crypto");
 
 // NOTA: Wompi requiere un endpoint público para mandar el Evento (No requiere Token JWT local)
 // Webhook URL a configurar en el Dashboard de Wompi: https://tudominio.com/api/suscripciones/wompi-webhook
@@ -49,7 +51,6 @@ router.post("/wompi-webhook", (req: any, res: any) => {
 });
 
 // Endpoint para obtener estado de la suscripción (Protegido para el Front de cada Tenant)
-const { verifyTokenAndTenant } = require("../middlewares/authMiddleware");
 router.get("/estado", verifyTokenAndTenant, (req: any, res: any) => {
   const empresa_id = req.user.empresa_id;
   
@@ -111,5 +112,4 @@ router.get("/superadmin/pagos", verifyTokenAndTenant, (req: any, res: any) => {
   );
 });
 
-module.exports = router;
-export {};
+export default router;

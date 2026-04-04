@@ -1,6 +1,7 @@
-const express = require("express");
+import express from "express";
+import connection from "../conection";
+
 const router = express.Router();
-const connection = require("../conection");
 
 router.get("/dashboard", (req, res) => {
   const { cajeroId, categoria, startDate, endDate } = req.query;
@@ -138,6 +139,5 @@ router.get("/dashboard", (req, res) => {
   });
 });
 
-module.exports = router;
-
+export default router;
 export {};

@@ -1,8 +1,9 @@
-const express = require("express");
+import express from "express";
+import connection from "../conection";
+import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
+
 const router = express.Router();
-const connection = require("../conection");
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
 
 // Patch table to migrate old single-tenant 'administradores' into 'usuarios_plataforma' temporarily on load
 connection.query(
@@ -134,5 +135,4 @@ router.post("/login", (req: any, res: any) => {
   );
 });
 
-module.exports = router;
-export {};
+export default router;

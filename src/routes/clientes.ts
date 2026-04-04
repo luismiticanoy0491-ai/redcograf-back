@@ -1,7 +1,8 @@
-const express = require("express");
+import express from "express";
+import connection from "../conection";
+import { verifyTokenAndTenant } from "../middlewares/authMiddleware";
+
 const router = express.Router();
-const connection = require("../conection");
-const { verifyTokenAndTenant } = require("../middlewares/authMiddleware");
 
 // Interceptar y proteger todas las rutas de clientes
 router.use(verifyTokenAndTenant);
@@ -37,5 +38,4 @@ router.delete("/:id", (req: any, res: any) => {
   });
 });
 
-module.exports = router;
-export {};
+export default router;

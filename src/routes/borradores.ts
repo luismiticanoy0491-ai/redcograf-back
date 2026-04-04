@@ -1,10 +1,11 @@
-const express = require("express");
+import express from "express";
+import connection from "../conection";
+
 const router = express.Router();
-const connection = require("../conection");
 
 // Obtener todos los borradores (al listar para cargar)
 router.get("/", (req, res) => {
-  connection.query("SELECT * FROM facturas_borrador ORDER BY fecha DESC", (err, results) => {
+  connection.query("SELECT * FROM facturas_borrador ORDER BY fecha DESC", (err: any, results: any[]) => {
     if (err) return res.status(500).json({ error: "Error obteniendo borradores" });
     res.json(results);
   });
@@ -22,9 +23,10 @@ router.post("/", async (req, res) => {
     // 1. Inyectar productos no inyectados al inventario inmediatamente para que se puedan vender
     for (let p of datos_json) {
       if (!p.inyectado) {
-        let existing = [];
+        let existing: any[] = [];
         if (p.referencia && p.referencia.trim() !== '') {
-          [existing] = await promiseDb.query("SELECT id FROM productos WHERE referencia = ? ORDER BY id DESC LIMIT 1", [p.referencia]);
+          const [res]: any = await promiseDb.query("SELECT id FROM productos WHERE referencia = ? ORDER BY id DESC LIMIT 1", [p.referencia]);
+          existing = res;
         }
         
         if (existing.length > 0) {
@@ -39,12 +41,12 @@ router.post("/", async (req, res) => {
           );
         }
         
-        p.inyectado = true; // Marcar como sumado al inventario
+        p.inyectado = true;
       }
     }
 
     const query = "INSERT INTO facturas_borrador (proveedor, numero_factura, datos_json) VALUES (?, ?, ?)";
-    const [results] = await promiseDb.query(query, [proveedor || '', numero_factura || '', JSON.stringify(datos_json)]);
+    const [results]: any = await promiseDb.query(query, [proveedor || '', numero_factura || '', JSON.stringify(datos_json)]);
 
     res.status(201).json({ id: results.insertId, proveedor, numero_factura, datos_json });
   } catch (err) {
@@ -62,6 +64,4 @@ router.delete("/:id", (req, res) => {
   });
 });
 
-module.exports = router;
-
-export {};
+export default router;

@@ -1,10 +1,11 @@
-const express = require("express");
+import express from "express";
+import connection from "../conection";
+
 const router = express.Router();
-const connection = require("../conection");
 
 // Listar todos los proveedores adaptando los nombres de columnas a lo que espera React
 router.get("/", (req, res) => {
-  connection.query("SELECT id, nombre as nombre_comercial, contacto as nit, telefono, direccion, email as correo FROM proveedores ORDER BY nombre ASC", (err, results) => {
+  connection.query("SELECT id, nombre as nombre_comercial, contacto as nit, telefono, direccion, email as correo FROM proveedores ORDER BY nombre ASC", (err: any, results: any[]) => {
     if (err) return res.status(500).json({ error: err.message });
     res.json(results);
   });
@@ -19,12 +20,10 @@ router.post("/", (req, res) => {
   }
 
   const query = "INSERT INTO proveedores (nombre, contacto, direccion, telefono, email) VALUES (?, ?, ?, ?, ?)";
-  connection.query(query, [nombre_comercial, nit || '', direccion || '', telefono || '', correo || ''], (err, results) => {
+  connection.query(query, [nombre_comercial, nit || '', direccion || '', telefono || '', correo || ''], (err: any, results: any) => {
     if (err) return res.status(500).json({ error: err.message });
     res.status(201).json({ id: results.insertId, message: "Proveedor registrado con éxito" });
   });
 });
 
-module.exports = router;
-
-export {};
+export default router;

@@ -1,5 +1,5 @@
 import { RowDataPacket } from 'mysql2';
-const mysql = require("mysql2/promise");
+import mysql from "mysql2/promise";
 
 async function migrateSaaS() {
   const connection = await mysql.createConnection({

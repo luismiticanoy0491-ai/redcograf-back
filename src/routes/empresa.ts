@@ -1,10 +1,11 @@
-const express = require("express");
+import express from "express";
+import connection from "../conection";
+
 const router = express.Router();
-const connection = require("../conection");
 
 // Obtener datos globales de la empresa
 router.get("/", (req, res) => {
-  connection.query("SELECT * FROM empresa_config WHERE id = 1", (err, results) => {
+  connection.query("SELECT * FROM empresa_config WHERE id = 1", (err: any, results: any[]) => {
     if (err) return res.status(500).json({ error: err.message });
     if (results.length === 0) return res.status(404).json({ error: "Datos no encontrados" });
     res.json(results[0]);
@@ -31,6 +32,4 @@ router.put("/", (req, res) => {
   });
 });
 
-module.exports = router;
-
-export {};
+export default router;

@@ -1,15 +1,15 @@
-const express = require("express");
+import express from "express";
+import connection from "../conection";
+
 const router = express.Router();
-const connection = require("../conection");
 
 // 1. Obtener el historial de facturas de compra
 router.get("/", (req, res) => {
-  connection.query("SELECT * FROM facturas_compra ORDER BY fecha DESC", (err, results) => {
+  connection.query("SELECT * FROM facturas_compra ORDER BY fecha DESC", (err: any, results: any[]) => {
     if (err) {
       console.error(err);
       return res.status(500).json({ error: "Error obteniendo facturas de compra" });
     }
-    // Parse json
     const facturas = results.map(r => ({
       ...r,
       datos_json: typeof r.datos_json === 'string' ? JSON.parse(r.datos_json) : r.datos_json
@@ -35,7 +35,7 @@ router.post("/", async (req, res) => {
       }
 
       if (p.referencia && p.referencia.trim() !== '') {
-        const [existing] = await promiseDb.query("SELECT id FROM productos WHERE referencia = ? ORDER BY id DESC LIMIT 1", [p.referencia]);
+        const [existing]: any = await promiseDb.query("SELECT id FROM productos WHERE referencia = ? ORDER BY id DESC LIMIT 1", [p.referencia]);
         
         if (existing.length > 0) {
           // Si existe, suma la cantidad e iguala los precios actuales a la nueva compra
@@ -57,7 +57,7 @@ router.post("/", async (req, res) => {
     
     // B) Guardar el Ticket de Compra para el Historial
     const insertQuery = "INSERT INTO facturas_compra (proveedor, numero_factura, total, datos_json) VALUES (?, ?, ?, ?)";
-    const [result] = await promiseDb.query(insertQuery, [proveedor || '', numero_factura || '', total || 0, JSON.stringify(productos)]);
+    const [result]: any = await promiseDb.query(insertQuery, [proveedor || '', numero_factura || '', total || 0, JSON.stringify(productos)]);
 
     res.status(201).json({ message: "Factura registrada y stock sumado correctamente", id: result.insertId });
   } catch (err) {
@@ -78,7 +78,7 @@ router.put("/:id", async (req, res) => {
   const promiseDb = connection.promise();
   try {
     // A) Extraer la factura vieja original para deshacer su efecto matemático
-    const [oldRows] = await promiseDb.query("SELECT datos_json FROM facturas_compra WHERE id = ?", [id]);
+    const [oldRows]: any = await promiseDb.query("SELECT datos_json FROM facturas_compra WHERE id = ?", [id]);
     if (oldRows.length === 0) return res.status(404).json({ error: "Factura no encontrada" });
     
     const oldProducts = typeof oldRows[0].datos_json === 'string' 
@@ -105,12 +105,14 @@ router.put("/:id", async (req, res) => {
     // C) Aplicar la NUEVA carga del inventario (como un ingreso en lote nuevo)
     for (const newP of productos) {
       let productId = null;
-      let existing = [];
+      let existing: any[] = [];
       
       if (newP.referencia && newP.referencia.trim() !== '') {
-         [existing] = await promiseDb.query("SELECT id FROM productos WHERE referencia = ? ORDER BY id DESC LIMIT 1", [newP.referencia]);
+         const [res]: any = await promiseDb.query("SELECT id FROM productos WHERE referencia = ? ORDER BY id DESC LIMIT 1", [newP.referencia]);
+         existing = res;
       } else {
-         [existing] = await promiseDb.query("SELECT id FROM productos WHERE nombre = ? ORDER BY id DESC LIMIT 1", [newP.nombre]);
+         const [res]: any = await promiseDb.query("SELECT id FROM productos WHERE nombre = ? ORDER BY id DESC LIMIT 1", [newP.nombre]);
+         existing = res;
       }
 
       if (existing.length > 0) {
@@ -140,6 +142,4 @@ router.put("/:id", async (req, res) => {
   }
 });
 
-module.exports = router;
-
-export {};
+export default router;

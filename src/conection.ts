@@ -1,14 +1,14 @@
-require('dotenv').config();
-const mysql = require("mysql2");
+import dotenv from 'dotenv';
+import mysql from "mysql2";
 
-// Using a Connection Pool is highly recommended over a single connection
-// This ensures the backend doesn't crash when idle and supports multiple requests concurrently.
+dotenv.config();
+
 const pool = mysql.createPool({
   host: process.env.DB_HOST || "localhost",
   user: process.env.DB_USER || "root",
   password: process.env.DB_PASSWORD || "",
   database: process.env.DB_NAME || "tienda_db",
-  port: process.env.DB_PORT || 3306,
+  port: Number(process.env.DB_PORT) || 3306,
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0
@@ -33,5 +33,4 @@ pool.getConnection((err, connection) => {
   if (connection) connection.release();
 });
 
-module.exports = pool;
-export {};
+export default pool;

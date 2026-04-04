@@ -1,4 +1,4 @@
-const mysql = require('mysql2');
+import mysql from 'mysql2';
 const connection = mysql.createConnection({ host: 'localhost', user: 'root', password: '', database: 'tienda_db' });
 const query = `
 CREATE TABLE IF NOT EXISTS facturas_compra (
@@ -16,4 +16,4 @@ connection.query(query, (err) => {
     connection.end();
 });
 
-export {};
+

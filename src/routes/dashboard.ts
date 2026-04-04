@@ -1,6 +1,7 @@
-const express = require("express");
+import express from "express";
+import connection from "../conection";
+
 const router = express.Router();
-const connection = require("../conection");
 
 // Obtener datos resumidos para el Dashboard Central
 router.get("/resumen", (req, res) => {
@@ -52,6 +53,4 @@ router.get("/resumen", (req, res) => {
   });
 });
 
-module.exports = router;
-
-export {};
+export default router;

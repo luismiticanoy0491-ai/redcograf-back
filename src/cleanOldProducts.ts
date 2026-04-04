@@ -1,4 +1,4 @@
-const mysql = require("mysql2");
+import mysql from "mysql2";
 
 const connection = mysql.createConnection({
   host: "localhost",
@@ -9,11 +9,11 @@ const connection = mysql.createConnection({
 
 connection.query(
   "DELETE FROM productos WHERE categoria IN ('Computadoras', 'Audio', 'Monitores', 'Periféricos', 'Tablets', 'Componentes')",
-  (err, results) => {
+  (err: any, results: any) => {
     if (err) console.error(err);
     else console.log(`✅ Eliminados ${results.affectedRows} productos de categoría de prueba antiguos.`);
     connection.end();
   }
 );
 
-export {};
+

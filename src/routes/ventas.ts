@@ -1,7 +1,8 @@
-const express = require("express");
+import express from "express";
+import pool from "../conection";
+import { verifyTokenAndTenant } from "../middlewares/authMiddleware";
+
 const router = express.Router();
-const pool = require("../conection");
-const { verifyTokenAndTenant } = require("../middlewares/authMiddleware");
 
 // Middleware de seguridad
 router.use(verifyTokenAndTenant);
@@ -150,5 +151,4 @@ function rollback(conn: any, res: any, err: any, msg: string) {
   });
 }
 
-module.exports = router;
-export {};
+export default router;

@@ -1,7 +1,8 @@
-const express = require("express");
+import express from "express";
+import connection from "../conection";
+import { verifyTokenAndTenant } from "../middlewares/authMiddleware";
+
 const router = express.Router();
-const connection = require("../conection");
-const { verifyTokenAndTenant } = require("../middlewares/authMiddleware");
 
 // Todas las rutas de productos requieren autenticación y Tenant
 router.use(verifyTokenAndTenant);
@@ -164,5 +165,4 @@ router.post("/revertir-stock", async (req: any, res: any) => {
   }
 });
 
-module.exports = router;
-export {};
+export default router;

@@ -1,7 +1,8 @@
-const express = require("express");
+import express from "express";
+import connection from "../conection";
+import { verifyTokenAndTenant } from "../middlewares/authMiddleware";
+
 const router = express.Router();
-const connection = require("../conection");
-const { verifyTokenAndTenant } = require("../middlewares/authMiddleware");
 
 // Todas las rutas de cajeros requieren autenticación y Tenant
 router.use(verifyTokenAndTenant);
@@ -93,5 +94,4 @@ router.delete("/:id", (req: any, res: any) => {
   });
 });
 
-module.exports = router;
-export {};
+export default router;

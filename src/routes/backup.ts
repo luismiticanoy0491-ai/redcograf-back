@@ -1,6 +1,7 @@
-const express = require("express");
+import express from "express";
+import connection from "../conection";
+
 const router = express.Router();
-const connection = require("../conection");
 
 // Endpoint principal de exportación maestra
 router.get("/download", (req, res) => {
@@ -62,6 +63,4 @@ router.get("/download", (req, res) => {
   });
 });
 
-module.exports = router;
-
-export {};
+export default router;

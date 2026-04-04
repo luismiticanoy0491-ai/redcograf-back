@@ -1,6 +1,7 @@
-const express = require("express");
+import express from "express";
+import connection from "../conection";
+
 const router = express.Router();
-const connection = require("../conection");
 
 // Ruta para generar predicciones y análisis estadísticos
 router.get("/predicciones", async (req, res) => {
@@ -21,7 +22,7 @@ router.get("/predicciones", async (req, res) => {
       GROUP BY v.producto_id, p.nombre, p.categoria, p.cantidad, mes
       ORDER BY mes ASC
     `;
-    const [rows] = await promiseDb.query(query);
+    const [rows]: any = await promiseDb.query(query);
 
     // 2. Procesar y normalizar los datos para cada producto específico
     const authData: Record<string, {
@@ -136,6 +137,4 @@ router.get("/predicciones", async (req, res) => {
   }
 });
 
-module.exports = router;
-
-export {};
+export default router;

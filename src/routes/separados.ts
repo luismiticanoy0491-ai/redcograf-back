@@ -1,7 +1,8 @@
-const express = require("express");
+import express from "express";
+import connection from "../conection";
+import { verifyTokenAndTenant } from "../middlewares/authMiddleware";
+
 const router = express.Router();
-const connection = require("../conection");
-const { verifyTokenAndTenant } = require("../middlewares/authMiddleware");
 
 // Middleware de seguridad
 router.use(verifyTokenAndTenant);
@@ -161,4 +162,4 @@ router.put("/:id/anular", (req: any, res: any) => {
   });
 });
 
-module.exports = router;
+export default router;
