@@ -1,4 +1,5 @@
-require('dotenv').config();
+import dotenv from "dotenv"
+dotenv.config();
 
 const express = require("express");
 const cors = require("cors");
@@ -30,4 +31,4 @@ const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
   console.log(`Servidor corriendo en puerto ${PORT}`);
 });
-export {};
+export { };
