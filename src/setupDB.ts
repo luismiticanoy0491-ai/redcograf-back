@@ -123,6 +123,7 @@ connection.connect((err: any) => {
           producto_id INT,
           cantidad INT NOT NULL,
           precio_unitario DECIMAL(15,2) NOT NULL,
+          costo_unitario DECIMAL(15,2) DEFAULT 0,
           FOREIGN KEY (empresa_id) REFERENCES empresas_suscritas(id) ON DELETE CASCADE,
           FOREIGN KEY (factura_id) REFERENCES facturas_venta(id) ON DELETE CASCADE,
           FOREIGN KEY (producto_id) REFERENCES productos(id) ON DELETE SET NULL

@@ -42,6 +42,7 @@ router.get("/dashboard", (req, res) => {
   const q1 = `
     SELECT 
       COALESCE(SUM(v.cantidad * v.precio_unitario), 0) as total_ingresos, 
+      COALESCE(SUM(v.cantidad * (v.precio_unitario - COALESCE(NULLIF(v.costo_unitario, 0), p.precio_compra, 0))), 0) as total_utilidad_global,
       COUNT(DISTINCT f.id) as total_ventas 
     FROM facturas_venta f
     LEFT JOIN ventas v ON f.id = v.factura_id
@@ -90,7 +91,8 @@ router.get("/dashboard", (req, res) => {
            COUNT(DISTINCT f.id) as cantidad_facturas, 
            COALESCE(SUM(v.cantidad * v.precio_unitario), 0) as dinero_recaudado,
            COALESCE(SUM(CASE WHEN f.metodo_pago = 'Efectivo' THEN (v.cantidad * v.precio_unitario) ELSE 0 END), 0) as dinero_efectivo,
-           COALESCE(SUM(CASE WHEN f.metodo_pago != 'Efectivo' AND f.metodo_pago IS NOT NULL THEN (v.cantidad * v.precio_unitario) ELSE 0 END), 0) as dinero_transferencia
+           COALESCE(SUM(CASE WHEN f.metodo_pago IN ('Tarjeta', 'Mixto') AND f.metodo_pago IS NOT NULL THEN (v.cantidad * v.precio_unitario) ELSE 0 END), 0) as dinero_transferencia,
+           COALESCE(SUM(v.cantidad * (v.precio_unitario - COALESCE(NULLIF(v.costo_unitario, 0), p.precio_compra, 0))), 0) as total_utilidad
     FROM cajeros c
     LEFT JOIN facturas_venta f ON c.id = f.cajero_id
     LEFT JOIN ventas v ON f.id = v.factura_id

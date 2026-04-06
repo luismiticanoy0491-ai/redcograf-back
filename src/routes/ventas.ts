@@ -37,8 +37,8 @@ router.post("/", (req: any, res: any) => {
 
           items.forEach((item: any) => {
             conn.query(
-              "INSERT INTO ventas (empresa_id, factura_id, producto_id, cantidad, precio_unitario) VALUES (?, ?, ?, ?, ?)", 
-              [empresa_id, facturaId, item.id, item.qty, item.precio_venta], 
+              "INSERT INTO ventas (empresa_id, factura_id, producto_id, cantidad, precio_unitario, costo_unitario) VALUES (?, ?, ?, ?, ?, ?)", 
+              [empresa_id, facturaId, item.id, item.qty, item.precio_venta, item.precio_compra || 0], 
               (err1: any) => {
                 if (err1) fallbackError = err1;
 

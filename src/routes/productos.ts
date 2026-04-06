@@ -8,20 +8,25 @@ const router = express.Router();
 router.use(verifyTokenAndTenant);
 
 router.get("/", (req: any, res: any) => {
-  const empresa_id = req.user.empresa_id;
+  let queryEmpresaId = req.user.empresa_id;
   
   if(req.user.role === 'superadmin') {
-     // El superadmin puede ver todo global o filtramos? Ideal que el front del admin pida /productos?empresa_id=X
-     const filterEmpresa = req.query.empresa_id || empresa_id;
+     const filterEmpresa = req.query.empresa_id;
      if(!filterEmpresa) {
-        return connection.query("SELECT * FROM productos ORDER BY id DESC", (err: any, results: any) => {
-          if (err) return res.status(500).json({ error: "Error en el servidor" });
-          return res.json(results);
+        connection.query("SELECT * FROM productos ORDER BY id DESC", (err: any, results: any) => {
+          if (err) {
+             console.error("DB Error:", err);
+             if (!res.headersSent) return res.status(500).json({ error: "Error en el servidor" });
+             return;
+          }
+          if (!res.headersSent) return res.json(results);
         });
+        return;
      }
+     queryEmpresaId = filterEmpresa;
   }
 
-  connection.query("SELECT * FROM productos WHERE empresa_id = ? ORDER BY id DESC", [empresa_id], (err: any, results: any) => {
+  connection.query("SELECT * FROM productos WHERE empresa_id = ? ORDER BY id DESC", [queryEmpresaId], (err: any, results: any) => {
     if (err) {
       console.error("Error al obtener productos:", err);
       return res.status(500).json({ error: "Error en el servidor" });

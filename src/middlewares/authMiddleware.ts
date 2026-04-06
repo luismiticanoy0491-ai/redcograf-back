@@ -14,8 +14,13 @@ export const verifyTokenAndTenant = (req: any, res: any, next: any) => {
       return res.status(401).json({ error: 'Token expirado o inválido' });
     }
 
-    req.user = decoded; // { id, role, username, empresa_id }
+    // Parche compatibilidad: Si es un token viejo (previo a SaaS), forzamos empresa 1 local.
+    if (!decoded.empresa_id) {
+       decoded.empresa_id = 1;
+    }
     
+    req.user = decoded; // { id, role, username, empresa_id }
+
     // Si la ruta no es super-admin, requerimos empresa_id
     if (decoded.role !== 'superadmin' && !decoded.empresa_id) {
        return res.status(401).json({ error: 'Usuario incompatible con arquitectura SaaS (Sin Empresa Asignada)'});
