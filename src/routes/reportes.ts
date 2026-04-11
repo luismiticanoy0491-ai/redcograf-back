@@ -1,10 +1,16 @@
 import express from "express";
 import connection from "../conection";
+import { verifyTokenAndTenant } from "../middlewares/authMiddleware";
 
 const router = express.Router();
 
-router.get("/dashboard", (req, res) => {
-  const { cajeroId, categoria, startDate, endDate } = req.query;
+// Seguridad ante todo
+router.use(verifyTokenAndTenant);
+
+router.get("/dashboard", (req: any, res: any) => {
+  const empresa_id = req.user.empresa_id;
+  const { cajeroId, categoria, startDate, endDate, es_servicio } = req.query;
+
   const reportes: {
     general: any;
     topProductos: any;
@@ -17,8 +23,9 @@ router.get("/dashboard", (req, res) => {
     ingresosCategorias: null
   };
 
-  let whereClauses = ["1=1"];
-  let params = [];
+  // Base where clauses focusing on tenant isolation
+  let whereClauses = ["f.empresa_id = ?"];
+  let params: any[] = [empresa_id];
 
   if (cajeroId) {
     whereClauses.push("f.cajero_id = ?");
@@ -28,17 +35,22 @@ router.get("/dashboard", (req, res) => {
     whereClauses.push("p.categoria = ?");
     params.push(categoria);
   }
+  if (es_servicio !== undefined && es_servicio !== "") {
+    whereClauses.push("p.es_servicio = ?");
+    params.push(es_servicio === 'true' || es_servicio === '1' ? 1 : 0);
+  }
   if (startDate) {
-    whereClauses.push("DATE(f.fecha) >= ?");
-    params.push(startDate);
+    whereClauses.push("f.fecha >= ?");
+    params.push(`${startDate} 00:00:00`);
   }
   if (endDate) {
-    whereClauses.push("DATE(f.fecha) <= ?");
-    params.push(endDate);
+    whereClauses.push("f.fecha <= ?");
+    params.push(`${endDate} 23:59:59`);
   }
 
   const whereSQL = whereClauses.join(" AND ");
 
+  // Q1: Resumen General
   const q1 = `
     SELECT 
       COALESCE(SUM(v.cantidad * v.precio_unitario), 0) as total_ingresos, 
@@ -50,6 +62,7 @@ router.get("/dashboard", (req, res) => {
     WHERE ${whereSQL}
   `;
   
+  // Q2: TOP PRODUCTOS
   const q2 = `
     SELECT p.nombre, p.categoria, SUM(v.cantidad) as total_vendido 
     FROM facturas_venta f
@@ -61,49 +74,51 @@ router.get("/dashboard", (req, res) => {
     LIMIT 5
   `;
 
-  // Para el ranking de cajeros, el LEFT JOIN desde cajeros es vital para mostrarlos a todos,
-  // pero aplicar el WHERE de p.categoria directamente anulará a los cajeros que no vendieron eso.
-  // Por ende, filtramos las ventas en la unión.
-  
-  let q3Params = [];
-  if (categoria) {
-    q3Params.push(categoria); // for the LEFT JOIN
-  }
+  // Q3: RENDIMIENTO CAJEROS (Filtrado Estricto por Categoría y Fecha)
+  let q3Params: any[] = [empresa_id];
+  let q3WhereClauses = ["f.empresa_id = ?"];
 
-  let q3WhereClauses = ["1=1"];
   if (cajeroId) {
-    q3WhereClauses.push("c.id = ?");
+    q3WhereClauses.push("f.cajero_id = ?");
     q3Params.push(cajeroId);
   }
   if (startDate) {
-    q3WhereClauses.push("DATE(f.fecha) >= ?");
-    q3Params.push(startDate);
+    q3WhereClauses.push("f.fecha >= ?");
+    q3Params.push(`${startDate} 00:00:00`);
   }
   if (endDate) {
-    q3WhereClauses.push("DATE(f.fecha) <= ?");
-    q3Params.push(endDate);
+    q3WhereClauses.push("f.fecha <= ?");
+    q3Params.push(`${endDate} 23:59:59`);
   }
-  
-  const q3Where = "WHERE " + q3WhereClauses.join(" AND ");
+  if (categoria) {
+    q3WhereClauses.push("p.categoria = ?");
+    q3Params.push(categoria);
+  }
+
+  const q3Where = q3WhereClauses.join(" AND ");
 
   const q3 = `
     SELECT c.nombre, 
            COUNT(DISTINCT f.id) as cantidad_facturas, 
            COALESCE(SUM(v.cantidad * v.precio_unitario), 0) as dinero_recaudado,
-           COALESCE(SUM(CASE WHEN f.metodo_pago = 'Efectivo' THEN (v.cantidad * v.precio_unitario) ELSE 0 END), 0) as dinero_efectivo,
-           COALESCE(SUM(CASE WHEN f.metodo_pago IN ('Tarjeta', 'Mixto') AND f.metodo_pago IS NOT NULL THEN (v.cantidad * v.precio_unitario) ELSE 0 END), 0) as dinero_transferencia,
+           COALESCE(SUM(CASE WHEN f.metodo_pago = 'Efectivo' THEN (v.cantidad * v.precio_unitario) WHEN f.metodo_pago = 'Mixto' THEN (f.pago_efectivo * (v.cantidad * v.precio_unitario / NULLIF(f.total, 0))) ELSE 0 END), 0) as dinero_efectivo,
+           COALESCE(SUM(CASE WHEN f.metodo_pago IN ('Tarjeta', 'Transferencia') THEN (v.cantidad * v.precio_unitario) WHEN f.metodo_pago = 'Mixto' THEN (f.pago_transferencia * (v.cantidad * v.precio_unitario / NULLIF(f.total, 0))) ELSE 0 END), 0) as dinero_transferencia,
            COALESCE(SUM(v.cantidad * (v.precio_unitario - COALESCE(NULLIF(v.costo_unitario, 0), p.precio_compra, 0))), 0) as total_utilidad
     FROM cajeros c
-    LEFT JOIN facturas_venta f ON c.id = f.cajero_id
-    LEFT JOIN ventas v ON f.id = v.factura_id
-    LEFT JOIN productos p ON v.producto_id = p.id ${categoria ? "AND p.categoria = ?" : ""}
-    ${q3Where}
+    JOIN facturas_venta f ON c.id = f.cajero_id
+    JOIN ventas v ON f.id = v.factura_id
+    JOIN productos p ON v.producto_id = p.id
+    WHERE ${q3Where}
     GROUP BY c.id
     ORDER BY dinero_recaudado DESC
   `;
 
+  // Q4: INGRESOS Y UTILIDAD POR CATEGORIA
   const q4 = `
-    SELECT p.categoria, COALESCE(SUM(v.cantidad * v.precio_unitario), 0) as total_recaudado
+    SELECT 
+      p.categoria, 
+      COALESCE(SUM(v.cantidad * v.precio_unitario), 0) as total_recaudado,
+      COALESCE(SUM(v.cantidad * (v.precio_unitario - COALESCE(NULLIF(v.costo_unitario, 0), p.precio_compra, 0))), 0) as total_utilidad
     FROM facturas_venta f
     JOIN ventas v ON f.id = v.factura_id
     JOIN productos p ON v.producto_id = p.id
@@ -112,10 +127,9 @@ router.get("/dashboard", (req, res) => {
     ORDER BY total_recaudado DESC
   `;
 
-  // Multipromise execution for cleaner flow
-  const runQuery = (query, params) => {
+  const runQuery = (query: string, queryParams: any[]) => {
     return new Promise((resolve, reject) => {
-      connection.query(query, params, (err, results) => {
+      connection.query(query, queryParams, (err, results) => {
         if (err) reject(err);
         else resolve(results);
       });
@@ -128,7 +142,7 @@ router.get("/dashboard", (req, res) => {
     runQuery(q3, q3Params),
     runQuery(q4, params)
   ])
-  .then(([res1, res2, res3, res4]) => {
+  .then(([res1, res2, res3, res4]: any) => {
     reportes.general = res1[0];
     reportes.topProductos = res2;
     reportes.rendimientoCajeros = res3;
@@ -136,7 +150,7 @@ router.get("/dashboard", (req, res) => {
     res.json(reportes);
   })
   .catch(err => {
-    console.error(err);
+    console.error("Analytics Error:", err);
     res.status(500).json({ error: "Error procesando analíticas" });
   });
 });

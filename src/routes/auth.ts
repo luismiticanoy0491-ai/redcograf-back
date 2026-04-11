@@ -2,6 +2,7 @@ import express from "express";
 import connection from "../conection";
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import { verifyTokenAndTenant } from "../middlewares/authMiddleware";
 
 const router = express.Router();
 
@@ -23,6 +24,18 @@ router.post("/registro-empresa", async (req: any, res: any) => {
   connection.query("SELECT * FROM usuarios_plataforma WHERE username = ?", [username], async (err: any, results: any[]) => {
     if (err) return res.status(500).json({ error: "Error interno de validación" });
     if (results.length > 0) return res.status(409).json({ error: "El nombre de usuario ya está tomado por otra tienda" });
+
+    // 1.5 Validar que el NIT no esté registrado (Debe ser único)
+    if (niti) {
+      try {
+        const [nitResults]: any = await connection.promise().query("SELECT id FROM empresas_suscritas WHERE nit = ?", [niti]);
+        if (nitResults.length > 0) {
+          return res.status(409).json({ error: `El NIT ${niti} ya ha sido registrado. Este número es único y no se puede repetir.` });
+        }
+      } catch (dbErr) {
+        return res.status(500).json({ error: "Error al validar el NIT" });
+      }
+    }
 
     try {
       const promisePool = connection.promise();
@@ -49,6 +62,12 @@ router.post("/registro-empresa", async (req: any, res: any) => {
           [empresa_id, username, hash]
         );
 
+        // Paso C: Crear Configuración de Empresa por defecto para el nuevo Tenant
+        await dbConn.query(
+          "INSERT INTO empresa_config (empresa_id, nombre_empresa, nit, direccion, correo, resolucion) VALUES (?, ?, ?, ?, ?, ?)",
+          [empresa_id, nombre_comercial, niti || '', 'Dirección Principal', correo || '', 'DOCUMENTO EQUIVALENTE DE FACTURA POS. Régimen Simplificado - No Responsable de IVA. Desarrollado por IMPULSA POS.']
+        );
+
         await dbConn.commit();
         dbConn.release();
 
@@ -63,8 +82,17 @@ router.post("/registro-empresa", async (req: any, res: any) => {
       } catch (txError: any) {
          await dbConn.rollback();
          dbConn.release();
-         console.error(txError);
-         res.status(500).json({ error: "No pudimos crear tu tienda SaaS. Intenta nuevamente." });
+         console.error("[ERROR CRÍTICO REGISTRO SAAS]:", txError);
+         
+         const errorMessage = txError.code === 'ER_DUP_ENTRY' 
+            ? "Ya existe una configuración activa o usuario con datos similares. Verifique los detalles."
+            : `Error técnico: ${txError.message || "Fallo en transacción"}`;
+
+         res.status(500).json({ 
+            error: "No pudimos crear tu tienda SaaS.",
+            detalle: errorMessage,
+            code: txError.code
+         });
       }
     } catch (error: any) {
        console.error("Error Obteniendo Conexión:", error);
@@ -73,9 +101,20 @@ router.post("/registro-empresa", async (req: any, res: any) => {
   });
 });
 
-// Registrar nuevo usuario interno (Cajeros de una tienda)
-router.post("/registro", async (req: any, res: any) => {
+// Registrar nuevo usuario interno (Cajeros de una tienda) - PROTEGIDO
+router.post("/registro", verifyTokenAndTenant, async (req: any, res: any) => {
   const { empresa_id, username, password, role } = req.body;
+  
+  // Seguridad: Solo el dueño o un admin de la misma empresa puede crear usuarios
+  if (req.user.role !== 'dueño' && req.user.role !== 'superadmin' && req.user.role !== 'admin') {
+    return res.status(403).json({ error: "No tienes permisos para crear usuarios." });
+  }
+
+  // Seguridad: Un dueño no puede crear usuarios para otra empresa
+  if (req.user.role !== 'superadmin' && req.user.empresa_id !== parseInt(empresa_id)) {
+    return res.status(403).json({ error: "No puedes crear usuarios para otras empresas." });
+  }
+
   if (!username || !password || !empresa_id) return res.status(400).json({ error: "Faltan datos" });
 
   connection.query("SELECT * FROM usuarios_plataforma WHERE username = ?", [username], async (err: any, results: any[]) => {
@@ -124,15 +163,187 @@ router.post("/login", (req: any, res: any) => {
         });
       }
 
+      if (!process.env.JWT_SECRET) {
+         console.error("JWT_SECRET missing in ENV!");
+         return res.status(500).json({ error: "Error de configuración de seguridad." });
+      }
+
       const token = jwt.sign(
         { id: admin.id, role: admin.role, username: admin.username, empresa_id: admin.empresa_id, nombre_comercial: admin.nombre_comercial },
-        process.env.JWT_SECRET || 'super_secret_key_development',
+        process.env.JWT_SECRET,
         { expiresIn: '8h' }
       );
 
       res.json({ success: true, token, role: admin.role, username: admin.username, empresa_id: admin.empresa_id, nombre_comercial: admin.nombre_comercial }); 
     }
   );
+});
+
+// --- NUEVAS RUTAS DE RECUPERACIÓN SEGURA CON OTP ---
+
+// 1. Solicitar Código (Valida NIT + Username)
+router.post("/solicitar-codigo", (req: any, res: any) => {
+  const { username, nit } = req.body;
+  if (!username || !nit) return res.status(400).json({ error: "Usuario y NIT son obligatorios" });
+
+  const query = `
+    SELECT u.id, e.correo_contacto, e.telefono_contacto 
+    FROM usuarios_plataforma u
+    INNER JOIN empresas_suscritas e ON u.empresa_id = e.id
+    WHERE u.username = ? AND e.nit = ?
+  `;
+
+  connection.query(query, [username, nit], (err: any, results: any[]) => {
+    if (err) return res.status(500).json({ error: "Error de servidor" });
+    if (results.length === 0) return res.status(404).json({ error: "No se encontró un usuario con ese NIT y Usuario" });
+
+    const { correo_contacto, telefono_contacto } = results[0];
+    
+    // Obscurecer datos para seguridad
+    const obscureEmail = (email: string) => {
+      if (!email) return "No registrado";
+      const parts = email.split('@');
+      const u = parts[0];
+      const d = parts[1];
+      return `${u.slice(0, 2)}***@${d}`;
+    };
+    const obscurePhone = (phone: string) => {
+      if (!phone) return "No registrado";
+      return `***-***-${phone.slice(-4)}`;
+    };
+
+    res.json({
+      success: true,
+      email: obscureEmail(correo_contacto || ''),
+      phone: obscurePhone(telefono_contacto || '')
+    });
+  });
+});
+
+// 2. Enviar Código vía Email o SMS
+router.post("/enviar-codigo", (req: any, res: any) => {
+  const { username, nit, metodo } = req.body;
+  if (!username || !nit || !metodo) return res.status(400).json({ error: "Faltan datos para el envío" });
+
+  const query = `
+    SELECT u.id, e.correo_contacto, e.telefono_contacto 
+    FROM usuarios_plataforma u
+    INNER JOIN empresas_suscritas e ON u.empresa_id = e.id
+    WHERE u.username = ? AND e.nit = ?
+  `;
+
+  connection.query(query, [username, nit], async (err: any, results: any[]) => {
+    if (err || results.length === 0) return res.status(404).json({ error: "Usuario no válido" });
+
+    const user = results[0];
+    const codigo = Math.floor(100000 + Math.random() * 900000).toString(); // 6 dígitos
+    const expiracion = new Date(Date.now() + 10 * 60000); // 10 minutos
+
+    // Guardar en DB
+    connection.query(
+      "INSERT INTO otp_verifications (usuario_id, codigo, tipo, expiracion) VALUES (?, ?, ?, ?)",
+      [user.id, codigo, metodo, expiracion],
+      (otpErr: any) => {
+        if (otpErr) return res.status(500).json({ error: "Error al generar código" });
+
+        // SIMULACIÓN DE ENVÍO PROFESIONAL EN LOGS
+        if (metodo === 'email') {
+          console.log(`[MAILER]: Enviando código ${codigo} a ${user.correo_contacto}`);
+        } else {
+          console.log(`[SMS_GATEWAY]: Enviando código ${codigo} a ${user.telefono_contacto}`);
+        }
+
+        res.json({ success: true, message: `Código enviado vía ${metodo === 'email' ? 'Correo Electrónico' : 'Mensaje de Texto'}` });
+      }
+    );
+  });
+});
+
+// 3. Validar Código
+router.post("/verificar-codigo", (req: any, res: any) => {
+  const { username, nit, codigo } = req.body;
+  
+  if (!codigo) return res.status(400).json({ error: "Código requerido" });
+
+  const query = `
+    SELECT o.id, o.usuario_id 
+    FROM otp_verifications o
+    INNER JOIN usuarios_plataforma u ON o.usuario_id = u.id
+    INNER JOIN empresas_suscritas e ON u.empresa_id = e.id
+    WHERE u.username = ? AND e.nit = ? AND o.codigo = ? AND o.usado = 0 AND o.expiracion > NOW()
+    ORDER BY o.fecha_creacion DESC LIMIT 1
+  `;
+
+  connection.query(query, [username, nit, codigo], (err: any, results: any[]) => {
+    if (err) return res.status(500).json({ error: "Error de validación" });
+    if (results.length === 0) return res.status(400).json({ error: "Código inválido o expirado" });
+
+    res.json({ success: true, message: "Identidad verificada" });
+  });
+});
+
+// 4. Restablecer con Código (Paso Final)
+router.post("/restablecer-final", async (req: any, res: any) => {
+  const { username, nit, codigo, newPassword } = req.body;
+
+  if (!newPassword || newPassword.length < 6) return res.status(400).json({ error: "La contraseña debe tener al menos 6 caracteres" });
+
+  const query = `
+    SELECT o.id, o.usuario_id 
+    FROM otp_verifications o
+    INNER JOIN usuarios_plataforma u ON o.usuario_id = u.id
+    INNER JOIN empresas_suscritas e ON u.empresa_id = e.id
+    WHERE u.username = ? AND e.nit = ? AND o.codigo = ? AND o.usado = 0 AND o.expiracion > NOW()
+    ORDER BY o.fecha_creacion DESC LIMIT 1
+  `;
+
+  connection.query(query, [username, nit, codigo], async (err: any, results: any[]) => {
+    if (err || results.length === 0) return res.status(400).json({ error: "Sesión de recuperación no válida" });
+
+    const { id: otpId, usuario_id } = results[0];
+
+    try {
+      const salt = await bcrypt.genSalt(10);
+      const hash = await bcrypt.hash(newPassword, salt);
+
+      connection.query(
+        "UPDATE usuarios_plataforma SET password_hash = ? WHERE id = ?",
+        [hash, usuario_id],
+        (updateErr) => {
+          if (updateErr) return res.status(500).json({ error: "Error al actualizar contraseña" });
+          
+          // Marcar OTP como usado
+          connection.query("UPDATE otp_verifications SET usado = 1 WHERE id = ?", [otpId]);
+          
+          res.json({ success: true, message: "Contraseña restaurada exitosamente" });
+        }
+      );
+    } catch (e) { res.status(500).json({ error: "Error en cifrado" }); }
+  });
+});
+
+// 5. Cambio de Contraseña desde Perfil (Ruta Protegida)
+router.post("/cambiar-password-perfil", verifyTokenAndTenant, async (req: any, res: any) => {
+  const { currentPassword, newPassword } = req.body;
+  const userId = req.user.id;
+
+  if (!currentPassword || !newPassword) return res.status(400).json({ error: "Datos faltantes" });
+  if (newPassword.length < 6) return res.status(400).json({ error: "Nueva clave muy corta (min 6 carac.)" });
+
+  connection.query("SELECT password_hash FROM usuarios_plataforma WHERE id = ?", [userId], async (err: any, results: any[]) => {
+    if (err || results.length === 0) return res.status(404).json({ error: "Usuario no encontrado" });
+
+    const valid = await bcrypt.compare(currentPassword, results[0].password_hash);
+    if (!valid) return res.status(401).json({ error: "La contraseña actual es incorrecta" });
+
+    const salt = await bcrypt.genSalt(10);
+    const hash = await bcrypt.hash(newPassword, salt);
+
+    connection.query("UPDATE usuarios_plataforma SET password_hash = ? WHERE id = ?", [hash, userId], (updErr) => {
+      if (updErr) return res.status(500).json({ error: "Error al guardar nueva clave" });
+      res.json({ success: true, message: "Contraseña actualizada exitosamente" });
+    });
+  });
 });
 
 export default router;

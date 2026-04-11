@@ -1,20 +1,27 @@
 import express from "express";
 import connection from "../conection";
+import { verifyTokenAndTenant } from "../middlewares/authMiddleware";
 
 const router = express.Router();
 
-// Obtener datos globales de la empresa
-router.get("/", (req, res) => {
-  connection.query("SELECT * FROM empresa_config WHERE id = 1", (err: any, results: any[]) => {
+// Todas las rutas de configuración requieren autenticación y aislamiento por Empresa (Tenant)
+router.use(verifyTokenAndTenant);
+
+// Obtener datos de la empresa del usuario autenticado
+router.get("/", (req: any, res: any) => {
+  const empresa_id = req.user.empresa_id;
+  
+  connection.query("SELECT * FROM empresa_config WHERE empresa_id = ?", [empresa_id], (err: any, results: any[]) => {
     if (err) return res.status(500).json({ error: err.message });
-    if (results.length === 0) return res.status(404).json({ error: "Datos no encontrados" });
+    if (results.length === 0) return res.status(404).json({ error: "Configuración no encontrada para su empresa" });
     res.json(results[0]);
   });
 });
 
-// Sobreescribir configuración
-router.put("/", (req, res) => {
-  const { nombre_empresa, nit, direccion, telefono, correo, resolucion } = req.body;
+// Actualizar configuración de la empresa del usuario
+router.put("/", (req: any, res: any) => {
+  const empresa_id = req.user.empresa_id;
+  const { nombre_empresa, nit, direccion, telefono, correo, resolucion, representante_legal, logo } = req.body;
   
   if (!nombre_empresa || !nit || !direccion || !correo || !resolucion) {
     return res.status(400).json({ error: "Todos los campos obligatorios deben estar presentes" });
@@ -22,13 +29,27 @@ router.put("/", (req, res) => {
 
   const query = `
     UPDATE empresa_config 
-    SET nombre_empresa = ?, nit = ?, direccion = ?, telefono = ?, correo = ?, resolucion = ?
-    WHERE id = 1
+    SET nombre_empresa = ?, nit = ?, direccion = ?, telefono = ?, correo = ?, resolucion = ?, representante_legal = ?, logo = ?
+    WHERE empresa_id = ?
   `;
   
-  connection.query(query, [nombre_empresa, nit, direccion, telefono || "", correo, resolucion], (err, results) => {
-    if (err) return res.status(500).json({ error: err.message });
-    res.json({ message: "Configuración actualizada con éxito" });
+  connection.query(query, [nombre_empresa, nit, direccion, telefono || "", correo, resolucion, representante_legal || "", logo || null, empresa_id], (err, results: any) => {
+    if (err) {
+      console.error("Error al actualizar empresa_config:", err);
+      return res.status(500).json({ error: err.message });
+    }
+    if (results.affectedRows === 0) {
+        const qInsert = `INSERT INTO empresa_config (empresa_id, nombre_empresa, nit, direccion, telefono, correo, resolucion, representante_legal, logo) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+        connection.query(qInsert, [empresa_id, nombre_empresa, nit, direccion, telefono || "", correo, resolucion, representante_legal || "", logo || null], (errI) => {
+            if (errI) {
+                console.error("Error al insertar empresa_config inicial:", errI);
+                return res.status(500).json({ error: "Error al crear configuración inicial" });
+            }
+            return res.json({ message: "Configuración creada con éxito" });
+        });
+    } else {
+        res.json({ message: "Configuración actualizada con éxito" });
+    }
   });
 });
 

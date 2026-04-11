@@ -1,5 +1,5 @@
 import express from "express";
-import connection from "../conection";
+import pool from "../conection";
 import { verifyTokenAndTenant } from "../middlewares/authMiddleware";
 
 const router = express.Router();
@@ -17,7 +17,7 @@ router.get("/", (req: any, res: any) => {
     WHERE s.empresa_id = ?
     ORDER BY s.fecha_creacion DESC
   `;
-  connection.query(sql, [empresa_id], (err: any, results: any) => {
+  pool.query(sql, [empresa_id], (err: any, results: any) => {
     if (err) return res.status(500).json({ error: "Error obteniendo separados" });
     res.json(results);
   });
@@ -27,7 +27,7 @@ router.get("/", (req: any, res: any) => {
 router.get("/:id", (req: any, res: any) => {
   const empresa_id = req.user.empresa_id;
   const { id } = req.params;
-  connection.query(`
+  pool.query(`
     SELECT s.*, c.nombre as cliente_nombre, c.documento as cliente_documento 
     FROM separados s 
     LEFT JOIN clientes c ON s.cliente_id = c.id 
@@ -35,7 +35,7 @@ router.get("/:id", (req: any, res: any) => {
   `, [id, empresa_id], (err: any, sepRes: any) => {
     if (err || sepRes.length === 0) return res.status(404).json({ error: "No encontrado" });
     
-    connection.query("SELECT * FROM abonos_separados WHERE separado_id = ? AND empresa_id = ? ORDER BY fecha_abono ASC", [id, empresa_id], (err2: any, abonosRes: any) => {
+    pool.query("SELECT * FROM abonos_separados WHERE separado_id = ? AND empresa_id = ? ORDER BY fecha_abono ASC", [id, empresa_id], (err2: any, abonosRes: any) => {
       res.json({
         separado: sepRes[0],
         abonos: abonosRes || []
@@ -44,122 +44,249 @@ router.get("/:id", (req: any, res: any) => {
   });
 });
 
-// POST new separado
-router.post("/", (req: any, res: any) => {
+// POST new separado (Con Reserva de Stock Inmediata y Aislamiento SaaS)
+router.post("/", async (req: any, res: any) => {
   const empresa_id = req.user.empresa_id;
   const { cliente_id, detalles, total, abono_inicial } = req.body;
   
   if (!cliente_id || !detalles || total === undefined) {
-    return res.status(400).json({ error: "Faltan datos" });
+    return res.status(400).json({ error: "Faltan datos obligatorios: cliente, productos o total." });
   }
 
-  const saldo_pendiente = total - (abono_inicial || 0);
+  const promisePool = pool.promise();
+  const conn = await promisePool.getConnection();
 
-  const sql = `INSERT INTO separados (empresa_id, cliente_id, total, saldo_pendiente, detalles_json) VALUES (?, ?, ?, ?, ?)`;
-  connection.query(sql, [empresa_id, cliente_id, total, saldo_pendiente, JSON.stringify(detalles)], (err: any, result: any) => {
-    if (err) return res.status(500).json({ error: "Error creando separado: " + err.message });
-    
-    const separadoId = result.insertId;
-    
-    if (abono_inicial && abono_inicial > 0) {
-      const sqlAbono = `INSERT INTO abonos_separados (empresa_id, separado_id, monto) VALUES (?, ?, ?)`;
-      connection.query(sqlAbono, [empresa_id, separadoId, abono_inicial], () => {
-        res.json({ success: true, message: "Separado creado con abono", separado_id: separadoId });
-      });
-    } else {
-      res.json({ success: true, message: "Separado creado", separado_id: separadoId });
+  try {
+    await conn.beginTransaction();
+
+    const saldo_pendiente = parseFloat(total) - (parseFloat(abono_inicial) || 0);
+
+    // 1. Crear el registro del Separado (Privado por empresa_id)
+    const [sepResult]: any = await conn.query(
+      "INSERT INTO separados (empresa_id, cliente_id, total, saldo_pendiente, detalles_json, estado) VALUES (?, ?, ?, ?, ?, 'Pendiente')",
+      [empresa_id, cliente_id, total, saldo_pendiente, JSON.stringify(detalles)]
+    );
+    const separadoId = sepResult.insertId;
+
+    // 2. Reservar Stock de cada producto del carrito
+    for (const item of detalles) {
+      const qty = parseInt(item.qty || item.cantidad || 0);
+      if (qty <= 0) continue;
+
+      // Bloquear fila de producto filtrando SIEMPRE por empresa_id (SaaS Privacy)
+      const [pData]: any = await conn.query(
+        "SELECT cantidad, es_servicio, nombre FROM productos WHERE id = ? AND empresa_id = ? FOR UPDATE", 
+        [item.id, empresa_id]
+      );
+      
+      if (pData.length === 0) throw new Error(`El producto con ID ${item.id} no existe en su inventario.`);
+      
+      const producto = pData[0];
+      if (!producto.es_servicio) {
+        if (producto.cantidad < qty) {
+          throw new Error(`Stock insuficiente para reservar "${producto.nombre}". Disponible: ${producto.cantidad}, Solicitado: ${qty}`);
+        }
+
+        // Descontar inmediatamente para "Apartar" el producto físicamente del inventario disponible
+        await conn.query(
+          "UPDATE productos SET cantidad = cantidad - ? WHERE id = ? AND empresa_id = ?", 
+          [qty, item.id, empresa_id]
+        );
+
+        // Registrar Reserva en Kardex (Privacidad SaaS)
+        await conn.query(
+          "INSERT INTO kardex (producto_id, empresa_id, tipo_movimiento, cantidad_antes, cantidad_modificada, cantidad_despues, motivo, referencia) VALUES (?, ?, 'SALIDA', ?, ?, ?, ?, ?)",
+          [item.id, empresa_id, producto.cantidad, qty, producto.cantidad - qty, 'Apartado por Separado', `SEP-${separadoId}`]
+        );
+      }
     }
-  });
+
+    // 3. Registrar Abono Inicial si fue entregado
+    if (abono_inicial && parseFloat(abono_inicial) > 0) {
+      const initMetodo = req.body.metodo_pago || 'Efectivo';
+      const initEfec = req.body.pago_efectivo || (initMetodo === 'Efectivo' ? abono_inicial : 0);
+      const initTrans = req.body.pago_transferencia || (initMetodo === 'Transferencia' ? abono_inicial : 0);
+
+      await conn.query(
+        "INSERT INTO abonos_separados (empresa_id, separado_id, monto, metodo_pago, pago_efectivo, pago_transferencia) VALUES (?, ?, ?, ?, ?, ?)",
+        [empresa_id, separadoId, abono_inicial, initMetodo, initEfec, initTrans]
+      );
+    }
+
+    await conn.commit();
+    res.status(201).json({ 
+        success: true, 
+        message: "¡Separado registrado y stock reservado con éxito!", 
+        separado_id: separadoId 
+    });
+
+  } catch (error: any) {
+    await conn.rollback();
+    console.error(`[ERROR SEPARADOS][EMPRESA ${empresa_id}]:`, error.message);
+    res.status(400).json({ error: error.message || "Fallo técnico al procesar el separado." });
+  } finally {
+    conn.release();
+  }
 });
 
-// POST abono a separado
-router.post("/:id/abonos", (req: any, res: any) => {
+// POST abono a separado (Atómico y Seguro)
+router.post("/:id/abonos", async (req: any, res: any) => {
   const empresa_id = req.user.empresa_id;
   const { id } = req.params;
   const { monto } = req.body;
-  if (!monto || monto <= 0) return res.status(400).json({ error: "Monto inválido" });
 
-  connection.query("SELECT saldo_pendiente, estado FROM separados WHERE id = ? AND empresa_id = ?", [id, empresa_id], (err: any, results: any) => {
-    if (err || results.length === 0) return res.status(404).json({ error: "Separado no encontrado" });
+  if (!monto || monto <= 0) return res.status(400).json({ error: "Monto de abono inválido" });
+
+  const promisePool = pool.promise();
+  const conn = await promisePool.getConnection();
+
+  try {
+    await conn.beginTransaction();
+
+    // Bloquear el separado para evitar doble abono simultáneo
+    const [results]: any = await conn.query("SELECT saldo_pendiente, estado FROM separados WHERE id = ? AND empresa_id = ? FOR UPDATE", [id, empresa_id]);
     
-    let { saldo_pendiente, estado } = results[0];
-    if (estado !== "Pendiente") return res.status(400).json({ error: "El separado ya está " + estado });
-    if (monto > saldo_pendiente) return res.status(400).json({ error: "El monto supera el saldo pendiente" });
+    if (results.length === 0) throw new Error("Separado no encontrado");
     
-    const nuevo_saldo = saldo_pendiente - monto;
+    const { saldo_pendiente, estado } = results[0];
+    if (estado !== "Pendiente") throw new Error(`El separado no admite abonos porque está ${estado}`);
+    if (monto > saldo_pendiente) throw new Error(`El abono (${monto}) supera el saldo pendiente (${saldo_pendiente})`);
     
-    connection.query("INSERT INTO abonos_separados (empresa_id, separado_id, monto) VALUES (?, ?, ?)", [empresa_id, id, monto], (err1: any) => {
-      if (err1) return res.status(500).json({ error: "Error insertando abono" });
-      
-      connection.query("UPDATE separados SET saldo_pendiente = ? WHERE id = ? AND empresa_id = ?", [nuevo_saldo, id, empresa_id], (err2: any) => {
-         if (err2) return res.status(500).json({ error: "Error actualizando saldo" });
-         res.json({ success: true, message: "Abono registrado correctamente", nuevo_saldo });
-      });
-    });
-  });
+    // 1. Insertar Registro de Abono Detallado
+    const met = req.body.metodo_pago || 'Efectivo';
+    const efec = req.body.pago_efectivo || (met === 'Efectivo' ? monto : 0);
+    const trans = req.body.pago_transferencia || (met === 'Transferencia' ? monto : 0);
+
+    await conn.query(
+      "INSERT INTO abonos_separados (empresa_id, separado_id, monto, metodo_pago, pago_efectivo, pago_transferencia) VALUES (?, ?, ?, ?, ?, ?)", 
+      [empresa_id, id, monto, met, efec, trans]
+    );
+    
+    // 2. Actualizar Saldo atómicamente
+    await conn.query("UPDATE separados SET saldo_pendiente = saldo_pendiente - ? WHERE id = ? AND empresa_id = ?", [monto, id, empresa_id]);
+
+    await conn.commit();
+    res.json({ success: true, message: "Abono registrado correctamente", nuevo_saldo: saldo_pendiente - monto });
+
+  } catch (error: any) {
+    await conn.rollback();
+    res.status(400).json({ error: error.message });
+  } finally {
+    conn.release();
+  }
 });
 
-// PUT completar separado (convertir a venta)
-router.put("/:id/completar", (req: any, res: any) => {
+// PUT completar separado (Convertir Reserva en Venta Final)
+router.put("/:id/completar", async (req: any, res: any) => {
   const empresa_id = req.user.empresa_id;
   const { id } = req.params;
-  const { cajero_id, metodo_pago } = req.body; 
+  const { cajero_id, metodo_pago, pago_efectivo, pago_transferencia } = req.body; 
 
-  connection.query("SELECT * FROM separados WHERE id = ? AND empresa_id = ?", [id, empresa_id], (err: any, results: any) => {
-    if (err || results.length === 0) return res.status(404).json({ error: "Separado no encontrado" });
-    
-    const separado = results[0];
-    if (separado.estado !== "Pendiente") return res.status(400).json({ error: "No se puede completar, estado es: " + separado.estado });
-    
+  const promisePool = pool.promise();
+  const conn = await promisePool.getConnection();
+  
+  try {
+    await conn.beginTransaction();
+
+    // 1. Validar estado (Bloquear transacción)
+    const [sepResults]: any = await conn.query("SELECT * FROM separados WHERE id = ? AND empresa_id = ? FOR UPDATE", [id, empresa_id]);
+    if (sepResults.length === 0) throw new Error("Separado no encontrado");
+    const separado = sepResults[0];
+
+    if (separado.estado !== "Pendiente") throw new Error("Este separado ya ha sido procesado o anulado");
+    if (separado.saldo_pendiente > 0) throw new Error(`Aún queda un saldo de ${separado.saldo_pendiente}. Liquídalo antes de facturar.`);
+
     const items = typeof separado.detalles_json === 'string' ? JSON.parse(separado.detalles_json) : separado.detalles_json;
-    
-    connection.query(
-       "INSERT INTO facturas_venta (empresa_id, cajero_id, cliente_id, total, metodo_pago) VALUES (?, ?, ?, ?, ?)", 
-       [empresa_id, cajero_id || null, separado.cliente_id, separado.total, metodo_pago || "Efectivo"], 
-       (errFV: any, fRes: any) => {
-           if (errFV) return res.status(500).json({ error: "Error creando factura final" });
-           
-           const facturaId = fRes.insertId;
-           let promises = [];
-           
-           for (let item of items) {
-               const qty = item.qty || item.cantidad;
-               const pItem = new Promise((resolve, reject) => {
-                   connection.query(
-                       "INSERT INTO ventas (empresa_id, factura_id, producto_id, cantidad, precio_unitario) VALUES (?, ?, ?, ?, ?)", 
-                       [empresa_id, facturaId, item.id, qty, item.precio_venta], 
-                       (errV: any) => {
-                           if (errV) return reject(errV);
-                           connection.query("UPDATE productos SET cantidad = cantidad - ? WHERE id = ? AND empresa_id = ?", [qty, item.id, empresa_id], (errU: any) => {
-                               if (errU) return reject(errU);
-                               resolve(true);
-                           });
-                       }
-                   );
-               });
-               promises.push(pItem);
-           }
-           
-           Promise.all(promises).then(() => {
-               connection.query("UPDATE separados SET estado = 'Pagado', saldo_pendiente = 0 WHERE id = ? AND empresa_id = ?", [id, empresa_id], () => {
-                  res.json({ success: true, message: "Separado completado y facturado exitosamente", factura_id: facturaId });
-               });
-           }).catch(errPr => {
-               console.error(errPr);
-               res.status(500).json({ error: "Error procesando items e inventario" });
-           });
-    });
-  });
+
+    // 2. Crear Factura Final de Venta
+    const [fRes]: any = await conn.query(
+      "INSERT INTO facturas_venta (empresa_id, cajero_id, cliente_id, total, metodo_pago, pago_efectivo, pago_transferencia) VALUES (?, ?, ?, ?, ?, ?, ?)", 
+      [empresa_id, cajero_id || null, separado.cliente_id, separado.total, metodo_pago || "Efectivo", pago_efectivo || 0, pago_transferencia || 0]
+    );
+    const facturaId = fRes.insertId;
+
+    // 3. Registrar detalles (Sin descontar stock de nuevo, ya se descontó al reservar)
+    for (const item of items) {
+      const qty = item.qty || item.cantidad;
+      const [pData]: any = await conn.query("SELECT precio_compra FROM productos WHERE id = ?", [item.id]);
+      const costo = pData[0]?.precio_compra || 0;
+
+      await conn.query(
+        "INSERT INTO ventas (empresa_id, factura_id, producto_id, cantidad, precio_unitario, costo_unitario) VALUES (?, ?, ?, ?, ?, ?)", 
+        [empresa_id, facturaId, item.id, qty, item.precio_venta, costo]
+      );
+
+      // Solo registro en Kardex que la reserva se convirtió en factura
+      await conn.query(
+        "INSERT INTO kardex (producto_id, empresa_id, tipo_movimiento, cantidad_antes, cantidad_modificada, cantidad_despues, motivo, referencia) VALUES (?, ?, 'SALIDA', 0, 0, 0, ?, ?)",
+        [item.id, empresa_id, 'Conversión Separado a Venta', `FS-${facturaId}`]
+      );
+    }
+
+    // 4. Marcar Separado como Pagado
+    await conn.query("UPDATE separados SET estado = 'Pagado', saldo_pendiente = 0 WHERE id = ? AND empresa_id = ?", [id, empresa_id]);
+
+    await conn.commit();
+    res.json({ success: true, message: "Separado facturado con éxito", factura_id: facturaId });
+
+  } catch (error: any) {
+    await conn.rollback();
+    console.error("Error completando separado:", error);
+    res.status(400).json({ error: error.message || "Error procesando el cierre de separado" });
+  } finally {
+    conn.release();
+  }
 });
 
-// PUT anular separado
-router.put("/:id/anular", (req: any, res: any) => {
+// PUT anular separado (Liberar Reserva de Stock)
+router.put("/:id/anular", async (req: any, res: any) => {
   const empresa_id = req.user.empresa_id;
   const { id } = req.params;
-  connection.query("UPDATE separados SET estado = 'Anulado' WHERE id = ? AND empresa_id = ?", [id, empresa_id], (err: any) => {
-    if (err) return res.status(500).json({ error: "Error anulando" });
-    res.json({ success: true, message: "Separado anulado correctamente" });
-  });
+  const { motivo } = req.body;
+
+  const promisePool = pool.promise();
+  const conn = await promisePool.getConnection();
+
+  try {
+    await conn.beginTransaction();
+
+    const [sepResults]: any = await conn.query("SELECT * FROM separados WHERE id = ? AND empresa_id = ? FOR UPDATE", [id, empresa_id]);
+    if (sepResults.length === 0) throw new Error("Separado no encontrado");
+    const separado = sepResults[0];
+
+    if (separado.estado !== "Pendiente") throw new Error("No se puede anular un separado que ya no está pendiente");
+
+    const items = typeof separado.detalles_json === 'string' ? JSON.parse(separado.detalles_json) : separado.detalles_json;
+
+    // Liberar Stock de cada ítem
+    for (const item of items) {
+      const qty = item.qty || item.cantidad;
+      const [pData]: any = await conn.query("SELECT cantidad, es_servicio FROM productos WHERE id = ? FOR UPDATE", [item.id]);
+      
+      if (pData.length > 0 && !pData[0].es_servicio) {
+         const stock_antes = pData[0].cantidad;
+         await conn.query("UPDATE productos SET cantidad = cantidad + ? WHERE id = ? AND empresa_id = ?", [qty, item.id, empresa_id]);
+         
+         // Registrar Liberación en Kardex
+         await conn.query(
+           "INSERT INTO kardex (producto_id, empresa_id, tipo_movimiento, cantidad_antes, cantidad_modificada, cantidad_despues, motivo, referencia) VALUES (?, ?, 'ENTRADA', ?, ?, ?, ?, ?)",
+           [item.id, empresa_id, stock_antes, qty, stock_antes + qty, `Anulación Separado: ${motivo || 'Sin detalle'}`, `SEP-${id}-ANUL`]
+         );
+      }
+    }
+
+    await conn.query("UPDATE separados SET estado = 'Anulado' WHERE id = ? AND empresa_id = ?", [id, empresa_id]);
+
+    await conn.commit();
+    res.json({ success: true, message: "Separado anulado y stock liberado correctamente" });
+
+  } catch (error: any) {
+    await conn.rollback();
+    res.status(500).json({ error: error.message });
+  } finally {
+    conn.release();
+  }
 });
 
 export default router;
+

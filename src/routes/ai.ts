@@ -1,89 +1,133 @@
 import express from "express";
 import connection from "../conection";
+import { verifyTokenAndTenant } from "../middlewares/authMiddleware";
 
 const router = express.Router();
 
-// Ruta para generar predicciones y análisis estadísticos
-router.get("/predicciones", async (req, res) => {
+// Ruta para generar predicciones y análisis estadísticos inteligentes (Auditada para Multi-Tenant)
+router.get("/predicciones", verifyTokenAndTenant, async (req: any, res: any) => {
   try {
+    const empresa_id = req.user.empresa_id;
     const promiseDb = connection.promise();
-    // 1. Obtener todas las ventas históricas de productos agrupadas por mes y año
+
+    // 1. Obtener ventas históricas FILTRADAS por Tenant ID
     const query = `
       SELECT 
         v.producto_id,
         p.nombre,
         p.categoria,
         p.cantidad AS stock_actual,
+        p.precio_venta,
         DATE_FORMAT(f.fecha, '%Y-%m') AS mes,
-        SUM(v.cantidad) AS total_vendido
+        SUM(v.cantidad) AS total_vendido,
+        SUM(v.cantidad * v.precio_unitario) AS ingresos_mes
       FROM ventas v
       JOIN facturas_venta f ON v.factura_id = f.id
       JOIN productos p ON v.producto_id = p.id
-      GROUP BY v.producto_id, p.nombre, p.categoria, p.cantidad, mes
+      WHERE f.empresa_id = ?
+      GROUP BY v.producto_id, p.nombre, p.categoria, p.cantidad, p.precio_venta, mes
       ORDER BY mes ASC
     `;
-    const [rows]: any = await promiseDb.query(query);
+    const [rows]: any = await promiseDb.query(query, [empresa_id]);
 
-    // 2. Procesar y normalizar los datos para cada producto específico
+    // 2. Procesar y normalizar los datos por producto
     const authData: Record<string, {
       id: number;
       nombre: string;
       categoria: string;
       stock_actual: number;
-      historia: { mes: string; cantidad: number }[];
-      sum_ventas: number;
+      precio_unitario: number;
+      historia: { mes: string; cantidad: number; ingresos: number }[];
+      total_vendido: number;
+      total_ingresos: number;
     }> = {};
+
     rows.forEach(row => {
-      const { producto_id, nombre, categoria, stock_actual, mes, total_vendido } = row;
+      const { producto_id, nombre, categoria, stock_actual, precio_venta, mes, total_vendido, ingresos_mes } = row;
       if (!authData[producto_id]) {
-        authData[producto_id] = { id: producto_id, nombre, categoria, stock_actual, historia: [], sum_ventas: 0 };
+        authData[producto_id] = { 
+          id: producto_id, 
+          nombre, 
+          categoria, 
+          stock_actual, 
+          precio_unitario: Number(precio_venta),
+          historia: [], 
+          total_vendido: 0,
+          total_ingresos: 0
+        };
       }
-      authData[producto_id].historia.push({ mes, cantidad: Number(total_vendido) });
-      authData[producto_id].sum_ventas += Number(total_vendido);
+      authData[producto_id].historia.push({ mes, cantidad: Number(total_vendido), ingresos: Number(ingresos_mes) });
+      authData[producto_id].total_vendido += Number(total_vendido);
+      authData[producto_id].total_ingresos += Number(ingresos_mes);
     });
 
-    // 3. Motor Estadístico - Ponderaciones de Inventario
-    const recomendaciones = [];
-    const graficaMensual: Record<string, { mes: string; total_unidades_reales: number; prediccion_proyectada?: number }> = {};
+    // 3. Obtener los últimos proveedores desde el Kardex para cada producto (Optimizado con JOIN)
+    const [auditProviders]: any = await promiseDb.query(
+      `SELECT k1.producto_id, k1.motivo 
+       FROM kardex k1
+       INNER JOIN (
+         SELECT MAX(id) as max_id 
+         FROM kardex 
+         WHERE empresa_id = ? AND tipo_movimiento IN ('ENTRADA', 'COMPRA_SERVICIO')
+         GROUP BY producto_id
+       ) k2 ON k1.id = k2.max_id`, [empresa_id]
+    );
 
-    Object.values(authData).forEach(prod => {
-      // Sumar los volúmenes globales para el gráfico macroscópico del negocio
+    const providerMap: Record<number, string> = {};
+    auditProviders.forEach((ap: any) => {
+        const prov = (ap.motivo || "").replace("Compra Factura: ", "");
+        providerMap[ap.producto_id] = prov || "Proveedor Genérico";
+    });
+
+    // 4. Motor de Inteligencia Empresarial - Análisis Estratégico
+    const recomendaciones = [];
+    const graficaMensual: Record<string, { mes: string; real: number; proyectado?: number }> = {};
+    const totalVentasGlobal = Object.values(authData).reduce((acc, p) => acc + p.total_vendido, 0);
+
+    // Clasificación ABC (Pareto) - Ordenar por volumen de ventas
+    const sortedProducts = Object.values(authData).sort((a, b) => b.total_vendido - a.total_vendido);
+
+    sortedProducts.forEach((prod, index) => {
+      // Sumar al gráfico macro
       prod.historia.forEach(h => {
-        if (!graficaMensual[h.mes]) graficaMensual[h.mes] = { mes: h.mes, total_unidades_reales: 0 };
-        graficaMensual[h.mes].total_unidades_reales += h.cantidad;
+        if (!graficaMensual[h.mes]) graficaMensual[h.mes] = { mes: h.mes, real: 0 };
+        graficaMensual[h.mes].real += h.cantidad;
       });
 
-      // Cálculo de predicción (Matemática Ponderada por Tendencia) para este producto
-      let prediccion_mes_siguiente = 0;
-      
+      // Algoritmo de Tendencia Predictiva (Weighted Moving Average + Linear Drift)
+      let prediccion_unidades = 0;
       if (prod.historia.length >= 2) {
-        // Existe tendencia en una línea de tiempo (mínimo 2 meses)
         const ult = prod.historia[prod.historia.length - 1].cantidad;
         const penult = prod.historia[prod.historia.length - 2].cantidad;
         const tendencia = ult - penult;
+        const avg = prod.total_vendido / prod.historia.length;
         
-        let avg = prod.sum_ventas / prod.historia.length;
-        // Pondera el último mes (60%) y el promedio global (40%) sumando la inercia (tendencia)
-        prediccion_mes_siguiente = Math.round((ult * 0.6) + (avg * 0.4) + (tendencia * 0.5));
+        // Ponderación dinámica: 50% último mes, 30% promedio, 20% inercia de crecimiento
+        prediccion_unidades = Math.round((ult * 0.5) + (avg * 0.3) + (tendencia * 0.2) + (ult * 0.05));
       } else if (prod.historia.length === 1) {
-        // Solo un registro existe (Venta debut)
-        const ult = prod.historia[0].cantidad;
-        prediccion_mes_siguiente = Math.round(ult * 1.05); // Crecimiento base plano del 5%
+        prediccion_unidades = Math.round(prod.historia[0].cantidad * 1.10); // Crecimiento debut 10%
       }
+      if (prediccion_unidades < 0) prediccion_unidades = 0;
 
-      if (prediccion_mes_siguiente < 0) prediccion_mes_siguiente = 0; // Prevenir desbalances absurdos
-      
-      // La Inteligencia resta y deduce el hueco o brecha comercial contra el almacén físico actual
-      let sugerencia_compra = prediccion_mes_siguiente - prod.stock_actual;
-      let status = "✅ Óptimo";
-      
-      if (sugerencia_compra > 0) {
-        status = "⚠️ Pedir Urgente";
+      // Análisis de Categoría ABC
+      const percentile = (index + 1) / sortedProducts.length;
+      let clase = "C (Baja Rotación)";
+      if (percentile <= 0.2) clase = "A (Producto Estrella)";
+      else if (percentile <= 0.5) clase = "B (Moderado)";
+
+      // Cálculo de Brecha y Estado
+      let sugerencia = prediccion_unidades - prod.stock_actual;
+      let status = "✅ BALANCEADO";
+      let impacto_economico = prediccion_unidades * prod.precio_unitario;
+
+      if (sugerencia > 0) {
+        status = "⚠️ REABASTECER";
       } else {
-        sugerencia_compra = 0;
-        // Si tienes el doble de piezas guardadas de lo que vas a vender el próximo mes, es inventario congelado
-        if (prod.stock_actual >= prediccion_mes_siguiente * 2) {
-          status = "🧊 Dinero Estancado";
+        sugerencia = 0;
+        if (prod.stock_actual > prediccion_unidades * 3 && prod.total_vendido > 0) {
+          status = "🧊 EXCESO DE STOCK";
+        } else if (prod.total_vendido === 0) {
+          status = "💀 PRODUCTO MUERTO";
         }
       }
 
@@ -91,49 +135,51 @@ router.get("/predicciones", async (req, res) => {
         id: prod.id,
         nombre: prod.nombre,
         categoria: prod.categoria,
-        stock_actual: prod.stock_actual,
-        vendido_historico: prod.sum_ventas,
-        meses_con_ventas: prod.historia.length,
-        prediccion_proximo_mes: prediccion_mes_siguiente,
-        sugerencia_compra: sugerencia_compra,
+        clase_abc: clase,
+        stock_disponible: prod.stock_actual,
+        vendido_total: prod.total_vendido,
+        proyeccion_demanda: prediccion_unidades,
+        faltante: sugerencia,
+        oportunidad_venta_usd: impacto_economico,
+        proveedor_sugerido: providerMap[prod.id] || "No registra compras previas",
         status: status
       });
     });
 
-    // Ordenamos la tabla maestra priorizando los productos que se van a agotar más rápido
-    recomendaciones.sort((a, b) => b.sugerencia_compra - a.sugerencia_compra);
+    // 5. Proyección Visual para el Frontend
+    let dataGrafica = Object.values(graficaMensual).sort((a, b) => a.mes.localeCompare(b.mes));
+    const totalProyectado = recomendaciones.reduce((acc, curr) => acc + curr.proyeccion_demanda, 0);
 
-    // 4. Interpolación de la Gráfica Visual Predictiva (Macro)
-    const graficaType = { mes: "", total_unidades_reales: 0, prediccion_proyectada: 0 };
-    type GraficaType = typeof graficaType;
-    let dataGrafica: (GraficaType | { mes: string; total_unidades_reales: number; prediccion_proyectada?: number })[] = Object.values(graficaMensual).sort((a, b) => a.mes.localeCompare(b.mes));
-    const sumaPrediccionesGlobales = recomendaciones.reduce((acc, curr) => acc + curr.prediccion_proximo_mes, 0);
-    
     if (dataGrafica.length > 0) {
-      // Añadir la variable "es_prediccion" a la última fecha real para que conecte la línea
-      dataGrafica[dataGrafica.length - 1].prediccion_proyectada = dataGrafica[dataGrafica.length - 1].total_unidades_reales;
-
-      // Generar el mes artificial estadístico al futuro y ligarlo
-      const ultimoMesString = dataGrafica[dataGrafica.length - 1].mes;
-      let d = new Date(ultimoMesString + "-01");
+      dataGrafica[dataGrafica.length - 1].proyectado = dataGrafica[dataGrafica.length - 1].real;
+      const lastMonth = dataGrafica[dataGrafica.length - 1].mes;
+      const d = new Date(lastMonth + "-01");
       d.setMonth(d.getMonth() + 1);
-      const nextMonthStr = d.toISOString().slice(0, 7) + " (Proyección AI)";
-      
+      const nextMonth = d.toISOString().slice(0, 7) + " (Predicción)";
+
       dataGrafica.push({
-        mes: nextMonthStr,
-        total_unidades_reales: 0,
-        prediccion_proyectada: sumaPrediccionesGlobales
+        mes: nextMonth,
+        real: 0,
+        proyectado: totalProyectado
       });
     }
 
     res.json({
+      resumenEjecutivo: {
+        totalEmpresa: empresa_id,
+        productosAnalizados: recomendaciones.length,
+        potencialIngresosProximoMes: recomendaciones.reduce((acc, c) => acc + c.oportunidad_venta_usd, 0)
+      },
       tendenciaGeneral: dataGrafica,
-      rankingIA: recomendaciones
+      analisisInteligente: recomendaciones.sort((a, b) => {
+          if (a.clase_abc[0] !== b.clase_abc[0]) return a.clase_abc.localeCompare(b.clase_abc);
+          return b.proyeccion_demanda - a.proyeccion_demanda;
+      })
     });
 
   } catch (err) {
-    console.error("Error en motor ML Predictivo:", err);
-    res.status(500).json({ error: "Fallo calculando algoritmos de decisión estadística." });
+    console.error("Critical Failure in AI Engine:", err);
+    res.status(500).json({ error: "Error procesando modelos de inteligencia multi-tenant." });
   }
 });
 

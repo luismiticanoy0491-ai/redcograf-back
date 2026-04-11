@@ -17,6 +17,8 @@ import ai from "./routes/ai";
 import auth from "./routes/auth";
 import separados from "./routes/separados";
 import pagosSaaS from "./routes/pagosSaaS";
+import kardex from "./routes/kardex";
+import whatsapp from "./routes/whatsapp";
 
 dotenv.config();
 
@@ -42,6 +44,8 @@ app.use("/ai", ai);
 app.use("/auth", auth);
 app.use("/separados", separados);
 app.use("/suscripciones", pagosSaaS);
+app.use("/kardex", kardex);
+app.use("/whatsapp", whatsapp);
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {

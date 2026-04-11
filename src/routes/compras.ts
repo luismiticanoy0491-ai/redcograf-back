@@ -1,11 +1,16 @@
 import express from "express";
-import connection from "../conection";
+import pool from "../conection";
+import { verifyTokenAndTenant } from "../middlewares/authMiddleware";
 
 const router = express.Router();
 
-// 1. Obtener el historial de facturas de compra
-router.get("/", (req, res) => {
-  connection.query("SELECT * FROM facturas_compra ORDER BY fecha DESC", (err: any, results: any[]) => {
+// Impedir accesos no autorizados y filtrar por empresa
+router.use(verifyTokenAndTenant);
+
+// 1. Obtener el historial de facturas de compra filtrado por empresa
+router.get("/", (req: any, res: any) => {
+  const empresa_id = req.user.empresa_id;
+  pool.query("SELECT * FROM facturas_compra WHERE empresa_id = ? ORDER BY fecha DESC", [empresa_id], (err: any, results: any[]) => {
     if (err) {
       console.error(err);
       return res.status(500).json({ error: "Error obteniendo facturas de compra" });
@@ -18,128 +23,193 @@ router.get("/", (req, res) => {
   });
 });
 
-// 2. Registrar una NUEVA factura de compra (Ingreso original)
-router.post("/", async (req, res) => {
+// 2. Registrar una NUEVA factura de compra
+router.post("/", async (req: any, res: any) => {
+  const empresa_id = req.user.empresa_id;
   const { proveedor, numero_factura, total, productos } = req.body;
+  const usuario_nombre = req.user.username || "Admin";
+  
   if (!Array.isArray(productos) || productos.length === 0) {
     return res.status(400).json({ error: "No se proporcionaron productos válidos." });
   }
 
-  const promiseDb = connection.promise();
-  try {
-    // A) Actualizar el inventario físico (similar al antiguo /productos/batch)
-    for (const p of productos) {
-      if (p.inyectado) {
-        // Si ya fue inyectado cuando era borrador, no lo volvemos a sumar.
-        continue;
-      }
+  const promiseDb = pool.promise();
+  const conn = await promiseDb.getConnection();
 
+  try {
+    await conn.beginTransaction();
+
+    for (const p of productos) {
+      let finalId: number;
+      let stock_antes = 0;
+
+      // Buscar si el producto existe para sumar stock
+      let found = false;
       if (p.referencia && p.referencia.trim() !== '') {
-        const [existing]: any = await promiseDb.query("SELECT id FROM productos WHERE referencia = ? ORDER BY id DESC LIMIT 1", [p.referencia]);
-        
+        const [existing]: any = await conn.query(
+            "SELECT id, cantidad FROM productos WHERE referencia = ? AND empresa_id = ? FOR UPDATE", 
+            [p.referencia, empresa_id]
+        );
         if (existing.length > 0) {
-          // Si existe, suma la cantidad e iguala los precios actuales a la nueva compra
-          await promiseDb.query(
-            "UPDATE productos SET cantidad = cantidad + ?, precio_compra = ?, precio_venta = ?, porcentaje_ganancia = ? WHERE id = ?",
-            [p.cantidad, p.precio_compra, p.precio_venta, p.porcentaje_ganancia, existing[0].id]
-          );
-          continue;
+          finalId = existing[0].id;
+          stock_antes = existing[0].cantidad;
+          found = true;
+          const esServicio = !!p.es_servicio;
+          const qUpdate = esServicio
+            ? "UPDATE productos SET precio_compra = ?, precio_venta = ?, porcentaje_ganancia = ?, es_servicio = 1 WHERE id = ? AND empresa_id = ?"
+            : "UPDATE productos SET cantidad = cantidad + ?, precio_compra = ?, precio_venta = ?, porcentaje_ganancia = ?, es_servicio = 0 WHERE id = ? AND empresa_id = ?";
+          
+          const params = esServicio 
+            ? [p.precio_compra, p.precio_venta, p.porcentaje_ganancia, finalId, empresa_id]
+            : [p.cantidad, p.precio_compra, p.precio_venta, p.porcentaje_ganancia, finalId, empresa_id];
+
+          await conn.query(qUpdate, params);
         }
       }
-      // Si no existe, lo creamos como nuevo
-      await promiseDb.query(
-        "INSERT INTO productos (referencia, nombre, categoria, cantidad, precio_compra, porcentaje_ganancia, precio_venta) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        [p.referencia || '', p.nombre, p.categoria, p.cantidad, p.precio_compra, p.porcentaje_ganancia, p.precio_venta]
-      );
+
+      if (!found) {
+        // Crear nuevo producto
+        const [resIns]: any = await conn.query(
+          "INSERT INTO productos (empresa_id, referencia, nombre, categoria, cantidad, precio_compra, porcentaje_ganancia, precio_venta, es_servicio) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          [empresa_id, p.referencia || '', p.nombre, p.categoria, p.cantidad, p.precio_compra, p.porcentaje_ganancia, p.precio_venta, p.es_servicio ? 1 : 0]
+        );
+        finalId = resIns.insertId;
+        stock_antes = 0;
+      }
+
+      // 3. Registrar Kardex
+      const esServicio = !!p.es_servicio;
+      const stock_despues = esServicio ? stock_antes : (stock_antes + p.cantidad);
+      const movType = esServicio ? 'COMPRA_SERVICIO' : 'ENTRADA';
       
-      p.inyectado = true; // Actualizamos estado porsiaca
+      await conn.query(
+        "INSERT INTO kardex (producto_id, empresa_id, tipo_movimiento, cantidad_antes, cantidad_modificada, cantidad_despues, motivo, usuario_nombre, referencia) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [finalId, empresa_id, movType, stock_antes, p.cantidad, stock_despues, `Compra Factura: ${proveedor || 'S/P'}`, usuario_nombre, `FC-${numero_factura || 'S/N'}`]
+      );
     }
     
-    // B) Guardar el Ticket de Compra para el Historial
-    const insertQuery = "INSERT INTO facturas_compra (proveedor, numero_factura, total, datos_json) VALUES (?, ?, ?, ?)";
-    const [result]: any = await promiseDb.query(insertQuery, [proveedor || '', numero_factura || '', total || 0, JSON.stringify(productos)]);
+    // 4. Registrar Factura
+    const insertQuery = "INSERT INTO facturas_compra (empresa_id, proveedor, numero_factura, total, datos_json) VALUES (?, ?, ?, ?, ?)";
+    const [result]: any = await conn.query(insertQuery, [empresa_id, proveedor || '', numero_factura || '', total || 0, JSON.stringify(productos)]);
 
-    res.status(201).json({ message: "Factura registrada y stock sumado correctamente", id: result.insertId });
-  } catch (err) {
+    await conn.commit();
+    res.status(201).json({ message: "Compra registrada y stock actualizado con trazabilidad.", id: result.insertId });
+  } catch (err: any) {
+    await conn.rollback();
     console.error("Error al registrar compra:", err);
-    res.status(500).json({ error: "Error actualizando el inventario por lotes" });
+    res.status(500).json({ error: "Fallo en transacción: " + err.message });
+  } finally {
+    conn.release();
   }
 });
 
-// 3. EDITAR una factura histórica (Revertir y aplicar nuevos deltas de inventario)
-router.put("/:id", async (req, res) => {
+// 3. EDITAR factura histórica (Delta de inventario con Kardex)
+router.put("/:id", async (req: any, res: any) => {
+  const empresa_id = req.user.empresa_id;
   const { id } = req.params;
   const { proveedor, numero_factura, total, productos } = req.body;
+  const usuario_nombre = req.user.username || "Admin";
+
+  const promiseDb = pool.promise();
+  const conn = await promiseDb.getConnection();
   
-  if (!Array.isArray(productos) || productos.length === 0) {
-    return res.status(400).json({ error: "Inventario inválido" });
-  }
-
-  const promiseDb = connection.promise();
   try {
-    // A) Extraer la factura vieja original para deshacer su efecto matemático
-    const [oldRows]: any = await promiseDb.query("SELECT datos_json FROM facturas_compra WHERE id = ?", [id]);
-    if (oldRows.length === 0) return res.status(404).json({ error: "Factura no encontrada" });
-    
-    const oldProducts = typeof oldRows[0].datos_json === 'string' 
-      ? JSON.parse(oldRows[0].datos_json) 
-      : oldRows[0].datos_json;
+    await conn.beginTransaction();
 
-    // B) Revertir (restar) las cantidades originales del inventario físico
+    const [oldRows]: any = await conn.query("SELECT datos_json FROM facturas_compra WHERE id = ? AND empresa_id = ? FOR UPDATE", [id, empresa_id]);
+    if (oldRows.length === 0) throw new Error("Factura no encontrada");
+    
+    const oldProducts = typeof oldRows[0].datos_json === 'string' ? JSON.parse(oldRows[0].datos_json) : oldRows[0].datos_json;
+
+    // Deshacer el stock de los productos viejos
     for (const oldP of oldProducts) {
-       // Buscar por referencia para restar el stock que habíamos ingresado
-       if (oldP.referencia) {
-         await promiseDb.query(
-           "UPDATE productos SET cantidad = cantidad - ? WHERE referencia = ? ORDER BY id DESC LIMIT 1", 
-           [oldP.cantidad, oldP.referencia]
-         );
-       } else if (oldP.nombre) {
-         // Fallback por si la referencia era nula
-         await promiseDb.query(
-           "UPDATE productos SET cantidad = cantidad - ? WHERE nombre = ? ORDER BY id DESC LIMIT 1", 
-           [oldP.cantidad, oldP.nombre]
+       let pId: number | null = null;
+       const [pSearch]: any = await conn.query(
+         "SELECT id, cantidad FROM productos WHERE (referencia = ? OR nombre = ?) AND empresa_id = ? FOR UPDATE", 
+         [oldP.referencia || '___', oldP.nombre || '___', empresa_id]
+       );
+
+       if (pSearch.length > 0) {
+         pId = pSearch[0].id;
+         const stock_antes = pSearch[0].cantidad;
+         const esServicio = !!pSearch[0].es_servicio;
+         
+         if (!esServicio) {
+            await conn.query("UPDATE productos SET cantidad = cantidad - ? WHERE id = ?", [oldP.cantidad, pId]);
+         }
+         
+         const stock_despues = esServicio ? stock_antes : (stock_antes - oldP.cantidad);
+         const movType = esServicio ? 'REVERSIÓN_COMPRA_SERVICIO' : 'SALIDA_CORRECCIÓN';
+
+         await conn.query(
+           "INSERT INTO kardex (producto_id, empresa_id, tipo_movimiento, cantidad_antes, cantidad_modificada, cantidad_despues, motivo, usuario_nombre, referencia) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+           [pId, empresa_id, movType, stock_antes, oldP.cantidad, stock_despues, 'Corrección Factura Compra (Deshacer)', usuario_nombre, `FC-${id}-CORR`]
          );
        }
     }
 
-    // C) Aplicar la NUEVA carga del inventario (como un ingreso en lote nuevo)
+    // Aplicar el nuevo stock
     for (const newP of productos) {
-      let productId = null;
-      let existing: any[] = [];
-      
-      if (newP.referencia && newP.referencia.trim() !== '') {
-         const [res]: any = await promiseDb.query("SELECT id FROM productos WHERE referencia = ? ORDER BY id DESC LIMIT 1", [newP.referencia]);
-         existing = res;
-      } else {
-         const [res]: any = await promiseDb.query("SELECT id FROM productos WHERE nombre = ? ORDER BY id DESC LIMIT 1", [newP.nombre]);
-         existing = res;
-      }
+      const [pSearch]: any = await conn.query(
+        "SELECT id, cantidad FROM productos WHERE (referencia = ? OR nombre = ?) AND empresa_id = ? FOR UPDATE", 
+        [newP.referencia || '___', newP.nombre || '___', empresa_id]
+      );
 
-      if (existing.length > 0) {
-        // Encontramos el producto: sumamos su nueva cantidad (editada) y sobreescribimos los costos maestros
-        await promiseDb.query(
-          "UPDATE productos SET cantidad = cantidad + ?, precio_compra = ?, precio_venta = ?, porcentaje_ganancia = ? WHERE id = ?",
-          [newP.cantidad, newP.precio_compra, newP.precio_venta, newP.porcentaje_ganancia, existing[0].id]
+      let pId: number;
+      let stock_antes = 0;
+
+      if (pSearch.length > 0) {
+        pId = pSearch[0].id;
+        stock_antes = pSearch[0].cantidad;
+        const esServicio = !!pSearch[0].es_servicio;
+
+        if (esServicio) {
+          await conn.query(
+            "UPDATE productos SET precio_compra = ?, precio_venta = ?, porcentaje_ganancia = ? WHERE id = ?",
+            [newP.precio_compra, newP.precio_venta, newP.porcentaje_ganancia, pId]
+          );
+        } else {
+          await conn.query(
+            "UPDATE productos SET cantidad = cantidad + ?, precio_compra = ?, precio_venta = ?, porcentaje_ganancia = ? WHERE id = ?",
+            [newP.cantidad, newP.precio_compra, newP.precio_venta, newP.porcentaje_ganancia, pId]
+          );
+        }
+        
+        const stock_despues = esServicio ? stock_antes : (stock_antes + newP.cantidad);
+        const movType = esServicio ? 'APLICACIÓN_COMPRA_SERVICIO' : 'ENTRADA_CORRECCIÓN';
+
+        await conn.query(
+          "INSERT INTO kardex (producto_id, empresa_id, tipo_movimiento, cantidad_antes, cantidad_modificada, cantidad_despues, motivo, usuario_nombre, referencia) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          [pId, empresa_id, movType, stock_antes, newP.cantidad, stock_despues, 'Corrección Factura Compra (Aplicar)', usuario_nombre, `FC-${id}-CORR`]
         );
       } else {
-        // Si durante la edición el usuario "añadió un producto nuevo" inédito en DB
-        await promiseDb.query(
-          "INSERT INTO productos (referencia, nombre, categoria, cantidad, precio_compra, porcentaje_ganancia, precio_venta) VALUES (?, ?, ?, ?, ?, ?, ?)",
-          [newP.referencia || '', newP.nombre, newP.categoria || 'Sin Categoría', newP.cantidad, newP.precio_compra, newP.porcentaje_ganancia, newP.precio_venta]
+        const [resIns]: any = await conn.query(
+          "INSERT INTO productos (empresa_id, referencia, nombre, categoria, cantidad, precio_compra, porcentaje_ganancia, precio_venta, es_servicio) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          [empresa_id, newP.referencia || '', newP.nombre, newP.categoria || 'General', newP.es_servicio ? 0 : newP.cantidad, newP.precio_compra, newP.porcentaje_ganancia, newP.precio_venta, newP.es_servicio ? 1 : 0]
+        );
+        pId = resIns.insertId;
+        stock_antes = 0;
+
+        await conn.query(
+          "INSERT INTO kardex (producto_id, empresa_id, tipo_movimiento, cantidad_antes, cantidad_modificada, cantidad_despues, motivo, usuario_nombre, referencia) VALUES (?, ?, 'ENTRADA_NUEVO', ?, ?, ?, ?, ?, ?)",
+          [pId, empresa_id, 0, newP.cantidad, newP.es_servicio ? 0 : newP.cantidad, 'Nueva Carga por Corrección', usuario_nombre, `FC-${id}-CORR`]
         );
       }
     }
 
-    // D) Sobreescribir el ticket original de la factura para reflejar la realidad editada
-    const updateQuery = "UPDATE facturas_compra SET proveedor=?, numero_factura=?, total=?, datos_json=?, fecha=CURRENT_TIMESTAMP WHERE id=?";
-    await promiseDb.query(updateQuery, [proveedor || '', numero_factura || '', total || 0, JSON.stringify(productos), id]);
+    const updateQuery = "UPDATE facturas_compra SET proveedor=?, numero_factura=?, total=?, datos_json=?, fecha=CURRENT_TIMESTAMP WHERE id=? AND empresa_id=?";
+    await conn.query(updateQuery, [proveedor || '', numero_factura || '', total || 0, JSON.stringify(productos), id, empresa_id]);
 
-    res.json({ message: "Factura y stock reajustado con éxito" });
-
-  } catch (err) {
-    console.error("Error al reescribir la factura invertida:", err);
-    res.status(500).json({ error: "Hubo un error calculando el Delta de inventario en reversa." });
+    await conn.commit();
+    res.json({ message: "Factura y stock reajustado con éxito y trazabilidad en Kardex." });
+  } catch (err: any) {
+    await conn.rollback();
+    console.error("Error al reescribir la factura:", err);
+    res.status(500).json({ error: "Fallo en Delta: " + err.message });
+  } finally {
+    conn.release();
   }
 });
 
 export default router;
+

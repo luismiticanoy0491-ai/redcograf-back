@@ -8,53 +8,70 @@ const connection = mysql.createConnection({
 });
 
 connection.connect((err: any) => {
-  if (err) throw err;
+  if (err) {
+    console.error("Error conectando a MySQL:", err);
+    process.exit(1);
+  }
   
   connection.query("CREATE DATABASE IF NOT EXISTS tienda_db", (err: any) => {
     if (err) throw err;
     connection.query("USE tienda_db", (err: any) => {
       if (err) throw err;
       
-      const setupQueries = `
-        SET FOREIGN_KEY_CHECKS = 0;
-        DROP TABLE IF EXISTS pagos_suscripcion;
-        DROP TABLE IF EXISTS usuarios_plataforma;
-        DROP TABLE IF EXISTS pagos_empleados;
-        DROP TABLE IF EXISTS ventas;
-        DROP TABLE IF EXISTS abonos_separados;
-        DROP TABLE IF EXISTS separados;
-        DROP TABLE IF EXISTS facturas_venta;
-        DROP TABLE IF EXISTS facturas_borrador;
-        DROP TABLE IF EXISTS facturas_compra;
-        DROP TABLE IF EXISTS productos;
-        DROP TABLE IF EXISTS cajeros;
-        DROP TABLE IF EXISTS clientes;
-        DROP TABLE IF EXISTS empresas_suscritas;
-        SET FOREIGN_KEY_CHECKS = 1;
-
-        -- 1. Tablas Maestras (SaaS)
-        CREATE TABLE empresas_suscritas (
+      const setupQueries = [
+        "SET FOREIGN_KEY_CHECKS = 0",
+        "DROP TABLE IF EXISTS kardex",
+        "DROP TABLE IF EXISTS empresa_config",
+        "DROP TABLE IF EXISTS pagos_suscripcion",
+        "DROP TABLE IF EXISTS usuarios_plataforma",
+        "DROP TABLE IF EXISTS pagos_empleados",
+        "DROP TABLE IF EXISTS ventas",
+        "DROP TABLE IF EXISTS abonos_separados",
+        "DROP TABLE IF EXISTS separados",
+        "DROP TABLE IF EXISTS facturas_venta",
+        "DROP TABLE IF EXISTS facturas_borrador",
+        "DROP TABLE IF EXISTS facturas_compra",
+        "DROP TABLE IF EXISTS productos",
+        "DROP TABLE IF EXISTS cajeros",
+        "DROP TABLE IF EXISTS clientes",
+        "DROP TABLE IF EXISTS proveedores",
+        "DROP TABLE IF EXISTS empresas_suscritas",
+        "DROP TABLE IF EXISTS plataforma_config",
+        "SET FOREIGN_KEY_CHECKS = 1",
+        `CREATE TABLE empresas_suscritas (
           id INT AUTO_INCREMENT PRIMARY KEY,
           nombre_comercial VARCHAR(255) NOT NULL,
-          nit VARCHAR(100) DEFAULT '',
+          nit VARCHAR(100) UNIQUE DEFAULT '',
           correo_contacto VARCHAR(100),
           telefono_contacto VARCHAR(50),
           fecha_registro TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
           fecha_vencimiento_suscripcion DATE NOT NULL,
           estado VARCHAR(50) DEFAULT 'Trial',
           wompi_subscription_id VARCHAR(255) NULL
-        );
-
-        CREATE TABLE usuarios_plataforma (
+        )`,
+        `CREATE TABLE usuarios_plataforma (
           id INT AUTO_INCREMENT PRIMARY KEY,
           empresa_id INT NOT NULL,
           username VARCHAR(100) NOT NULL UNIQUE,
           password_hash VARCHAR(255) NOT NULL,
           role VARCHAR(50) DEFAULT 'dueño',
           FOREIGN KEY (empresa_id) REFERENCES empresas_suscritas(id) ON DELETE CASCADE
-        );
-
-        CREATE TABLE pagos_suscripcion (
+        )`,
+        `CREATE TABLE empresa_config (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          empresa_id INT NOT NULL UNIQUE,
+          nombre_empresa VARCHAR(255) NOT NULL,
+          nit VARCHAR(100) DEFAULT '',
+          direccion VARCHAR(255) DEFAULT '',
+          correo VARCHAR(100) DEFAULT '',
+          telefono VARCHAR(100) DEFAULT '',
+          resolucion TEXT,
+          representante_legal VARCHAR(255) DEFAULT '',
+          logo LONGTEXT NULL,
+          permitir_venta_negativa BOOLEAN DEFAULT 1,
+          FOREIGN KEY (empresa_id) REFERENCES empresas_suscritas(id) ON DELETE CASCADE
+        )`,
+        `CREATE TABLE pagos_suscripcion (
           id INT AUTO_INCREMENT PRIMARY KEY,
           empresa_id INT NOT NULL,
           wompi_transaction_id VARCHAR(255) NOT NULL,
@@ -63,60 +80,71 @@ connection.connect((err: any) => {
           metodo_pago VARCHAR(100) DEFAULT 'Wompi',
           dias_agregados INT DEFAULT 30,
           FOREIGN KEY (empresa_id) REFERENCES empresas_suscritas(id) ON DELETE CASCADE
-        );
-
-        -- 2. Tablas de Tienda
-        CREATE TABLE productos (
+        )`,
+        `CREATE TABLE proveedores (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          empresa_id INT NOT NULL,
+          nombre VARCHAR(255) NOT NULL,
+          nit VARCHAR(100) DEFAULT '',
+          contacto VARCHAR(100),
+          direccion VARCHAR(255),
+          telefono VARCHAR(50),
+          email VARCHAR(100),
+          FOREIGN KEY (empresa_id) REFERENCES empresas_suscritas(id) ON DELETE CASCADE
+        )`,
+        `CREATE TABLE productos (
           id INT AUTO_INCREMENT PRIMARY KEY,
           empresa_id INT NOT NULL,
           referencia VARCHAR(100) DEFAULT '',
           nombre VARCHAR(255) NOT NULL,
           categoria VARCHAR(100) NOT NULL,
           cantidad INT NOT NULL DEFAULT 0,
+          cantidad_reservada INT NOT NULL DEFAULT 0,
           precio_compra DECIMAL(15,2) NOT NULL,
           porcentaje_ganancia DECIMAL(5,2) NOT NULL DEFAULT 40,
           precio_venta DECIMAL(15,2) NOT NULL,
+          es_servicio BOOLEAN DEFAULT 0,
+          permitir_venta_negativa BOOLEAN DEFAULT 1,
           FOREIGN KEY (empresa_id) REFERENCES empresas_suscritas(id) ON DELETE CASCADE
-        );
-
-        CREATE TABLE cajeros (
+        )`,
+        `CREATE TABLE cajeros (
           id INT AUTO_INCREMENT PRIMARY KEY,
           empresa_id INT NOT NULL,
           nombre VARCHAR(255) NOT NULL,
           documento VARCHAR(50),
-          telefono VARCHAR(50) DEFAULT '',
-          direccion VARCHAR(255) DEFAULT '',
-          fecha_contrato DATE DEFAULT NULL,
-          salario DECIMAL(15,2) DEFAULT 0.00,
+          telefono VARCHAR(50),
+          direccion VARCHAR(255),
+          fecha_contrato DATE,
+          salario DECIMAL(15,2) DEFAULT 0,
           paga_comisiones BOOLEAN DEFAULT 0,
-          porcentaje_comision DECIMAL(5,2) DEFAULT 0.00,
+          porcentaje_comision DECIMAL(5,2) DEFAULT 0,
           FOREIGN KEY (empresa_id) REFERENCES empresas_suscritas(id) ON DELETE CASCADE
-        );
-
-        CREATE TABLE clientes (
+        )`,
+        `CREATE TABLE clientes (
           id INT AUTO_INCREMENT PRIMARY KEY,
           empresa_id INT NOT NULL,
           nombre VARCHAR(255) NOT NULL,
           documento VARCHAR(50),
           telefono VARCHAR(50),
           correo VARCHAR(100),
+          direccion VARCHAR(255),
           FOREIGN KEY (empresa_id) REFERENCES empresas_suscritas(id) ON DELETE CASCADE
-        );
-
-        CREATE TABLE facturas_venta (
+        )`,
+        `CREATE TABLE facturas_venta (
           id INT AUTO_INCREMENT PRIMARY KEY,
           empresa_id INT NOT NULL,
           cajero_id INT NULL,
           cliente_id INT NULL,
           total DECIMAL(15,2) NOT NULL,
           metodo_pago VARCHAR(50) NOT NULL,
+          pago_efectivo DECIMAL(15,2) DEFAULT 0,
+          pago_transferencia DECIMAL(15,2) DEFAULT 0,
           fecha TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
           FOREIGN KEY (empresa_id) REFERENCES empresas_suscritas(id) ON DELETE CASCADE,
           FOREIGN KEY (cajero_id) REFERENCES cajeros(id) ON DELETE SET NULL,
           FOREIGN KEY (cliente_id) REFERENCES clientes(id) ON DELETE SET NULL
-        );
-
-        CREATE TABLE ventas (
+        )`,
+        `CREATE TABLE ventas (
           id INT AUTO_INCREMENT PRIMARY KEY,
           empresa_id INT NOT NULL,
           factura_id INT NOT NULL,
@@ -127,84 +155,110 @@ connection.connect((err: any) => {
           FOREIGN KEY (empresa_id) REFERENCES empresas_suscritas(id) ON DELETE CASCADE,
           FOREIGN KEY (factura_id) REFERENCES facturas_venta(id) ON DELETE CASCADE,
           FOREIGN KEY (producto_id) REFERENCES productos(id) ON DELETE SET NULL
-        );
-
-        CREATE TABLE pagos_empleados (
+        )`,
+        `CREATE TABLE facturas_borrador (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          empresa_id INT NOT NULL,
+          proveedor VARCHAR(255),
+          numero_factura VARCHAR(100),
+          datos_json LONGTEXT,
+          fecha TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (empresa_id) REFERENCES empresas_suscritas(id) ON DELETE CASCADE
+        )`,
+        `CREATE TABLE facturas_compra (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          empresa_id INT NOT NULL,
+          proveedor VARCHAR(255),
+          numero_factura VARCHAR(100),
+          total DECIMAL(15,2),
+          datos_json LONGTEXT,
+          fecha TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (empresa_id) REFERENCES empresas_suscritas(id) ON DELETE CASCADE
+        )`,
+        `CREATE TABLE separados (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          empresa_id INT NOT NULL,
+          cliente_id INT NOT NULL,
+          producto_id INT NOT NULL,
+          cantidad INT NOT NULL,
+          total DECIMAL(15,2) NOT NULL,
+          abono_inicial DECIMAL(15,2) DEFAULT 0,
+          saldo_pendiente DECIMAL(15,2) NOT NULL,
+          estado VARCHAR(50) DEFAULT 'Pendiente',
+          fecha_inicio TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          fecha_vencimiento DATE,
+          FOREIGN KEY (empresa_id) REFERENCES empresas_suscritas(id) ON DELETE CASCADE,
+          FOREIGN KEY (cliente_id) REFERENCES clientes(id) ON DELETE CASCADE,
+          FOREIGN KEY (producto_id) REFERENCES productos(id) ON DELETE CASCADE
+        )`,
+        `CREATE TABLE abonos_separados (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          empresa_id INT NOT NULL,
+          separado_id INT NOT NULL,
+          monto DECIMAL(15,2) NOT NULL,
+          fecha_pago TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (empresa_id) REFERENCES empresas_suscritas(id) ON DELETE CASCADE,
+          FOREIGN KEY (separado_id) REFERENCES separados(id) ON DELETE CASCADE
+        )`,
+        `CREATE TABLE kardex (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          empresa_id INT NOT NULL,
+          producto_id INT,
+          tipo_movimiento VARCHAR(50) NOT NULL,
+          cantidad_antes INT DEFAULT 0,
+          cantidad_modificada INT DEFAULT 0,
+          cantidad_despues INT DEFAULT 0,
+          motivo VARCHAR(255),
+          usuario_nombre VARCHAR(100),
+          fecha TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          referencia VARCHAR(100),
+          FOREIGN KEY (empresa_id) REFERENCES empresas_suscritas(id) ON DELETE CASCADE,
+          FOREIGN KEY (producto_id) REFERENCES productos(id) ON DELETE SET NULL
+        )`,
+        `CREATE TABLE pagos_empleados (
           id INT AUTO_INCREMENT PRIMARY KEY,
           empresa_id INT NOT NULL,
           cajero_id INT NOT NULL,
           mes INT NOT NULL,
           anio INT NOT NULL,
-          salario_base DECIMAL(15,2) DEFAULT 0.00,
-          comisiones DECIMAL(15,2) DEFAULT 0.00,
-          total_pagado DECIMAL(15,2) DEFAULT 0.00,
+          salario_base DECIMAL(15,2) NOT NULL,
+          comisiones DECIMAL(15,2) DEFAULT 0,
+          total_pagado DECIMAL(15,2) NOT NULL,
           fecha_pago TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-          metodo_pago VARCHAR(50) DEFAULT 'Efectivo',
+          metodo_pago VARCHAR(100) DEFAULT 'Efectivo',
           FOREIGN KEY (empresa_id) REFERENCES empresas_suscritas(id) ON DELETE CASCADE,
           FOREIGN KEY (cajero_id) REFERENCES cajeros(id) ON DELETE CASCADE
-        );
-        
-        CREATE TABLE facturas_borrador (
-          id INT AUTO_INCREMENT PRIMARY KEY,
-          empresa_id INT NOT NULL,
-          proveedor VARCHAR(255) DEFAULT '',
-          numero_factura VARCHAR(100) DEFAULT '',
-          fecha TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-          datos_json JSON NOT NULL,
-          FOREIGN KEY (empresa_id) REFERENCES empresas_suscritas(id) ON DELETE CASCADE
-        );
+        )`,
+        `CREATE TABLE plataforma_config (
+          id INT PRIMARY KEY,
+          wompi_public_key VARCHAR(255) DEFAULT '',
+          wompi_private_key VARCHAR(255) DEFAULT '',
+          wompi_integrity_secret VARCHAR(255) DEFAULT '',
+          wompi_event_secret VARCHAR(255) DEFAULT '',
+          precio_mes_centavos BIGINT DEFAULT 7000000,
+          precio_semestre_centavos BIGINT DEFAULT 37800000,
+          precio_anio_centavos BIGINT DEFAULT 67200000
+        )`,
+        "INSERT INTO plataforma_config (id) VALUES (1)",
+        "INSERT INTO empresas_suscritas (id, nombre_comercial, fecha_vencimiento_suscripcion, estado) VALUES (1, 'PAPELERIA REDCOGRAF', '2030-12-31', 'Active')",
+        "INSERT INTO empresa_config (empresa_id, nombre_empresa) VALUES (1, 'PAPELERIA REDCOGRAF')",
+        "INSERT INTO usuarios_plataforma (empresa_id, username, password_hash, role) VALUES (1, 'redcograf', '$2b$10$Srhb7e3.J9LRn24/QPx0CuyLqJhQ.zR.utVqd7af2F2SBoejy3ruy', 'superadmin')"
+      ];
 
-        CREATE TABLE facturas_compra (
-          id INT AUTO_INCREMENT PRIMARY KEY,
-          empresa_id INT NOT NULL,
-          proveedor VARCHAR(255) DEFAULT '',
-          numero_factura VARCHAR(100) DEFAULT '',
-          fecha TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-          total DECIMAL(15,2) DEFAULT 0,
-          datos_json JSON NOT NULL,
-          FOREIGN KEY (empresa_id) REFERENCES empresas_suscritas(id) ON DELETE CASCADE
-        );
-
-        CREATE TABLE separados (
-          id INT AUTO_INCREMENT PRIMARY KEY,
-          empresa_id INT NOT NULL,
-          cliente_id INT,
-          fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-          total DECIMAL(15,2) NOT NULL,
-          saldo_pendiente DECIMAL(15,2) NOT NULL,
-          estado VARCHAR(20) DEFAULT 'Pendiente', 
-          detalles_json JSON NOT NULL,
-          FOREIGN KEY (empresa_id) REFERENCES empresas_suscritas(id) ON DELETE CASCADE,
-          FOREIGN KEY (cliente_id) REFERENCES clientes(id) ON DELETE CASCADE
-        );
-
-        CREATE TABLE abonos_separados (
-          id INT AUTO_INCREMENT PRIMARY KEY,
-          empresa_id INT NOT NULL,
-          separado_id INT,
-          fecha_abono TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-          monto DECIMAL(15,2) NOT NULL,
-          FOREIGN KEY (empresa_id) REFERENCES empresas_suscritas(id) ON DELETE CASCADE,
-          FOREIGN KEY (separado_id) REFERENCES separados(id) ON DELETE CASCADE
-        );
-
-        -- Insertar Datos Default para el Entorno de Pruebas
-        INSERT INTO empresas_suscritas (id, nombre_comercial, fecha_vencimiento_suscripcion, estado) 
-        VALUES (1, 'Mi Tienda Inicial (SaaS)', DATE_ADD(CURRENT_DATE, INTERVAL 3650 DAY), 'Active');
-
-        INSERT INTO productos (empresa_id, referencia, nombre, categoria, cantidad, precio_compra, porcentaje_ganancia, precio_venta) VALUES 
-        (1, 'SKU-001', 'Producto Ejemplo 1', 'General', 10, 50000.00, 40, 70000.00);
-
-        INSERT INTO cajeros (empresa_id, nombre, documento) VALUES (1, 'Admin Principal', '00000000');
-        INSERT INTO clientes (empresa_id, nombre, documento, telefono) VALUES (1, 'Cliente General (Mostrador)', 'N/A', 'N/A');
-      `;
-
-      connection.query(setupQueries, (err: any) => {
-        if (err) throw err;
-        console.log("✅ Base de datos reconstruida 100% como arquitectura SAAS Multitienda (aislamiento por tenant).");
+      const runSync = async () => {
+        for (const q of setupQueries) {
+          try {
+            await connection.promise().query(q);
+          } catch (e: any) {
+            console.error("Error en query:", q);
+            console.error(e.message);
+          }
+        }
+        console.log("✅ Base de datos reconstruida con acceso SuperAdmin.");
         connection.end();
-      });
+      };
+      
+      runSync();
     });
   });
 });
-

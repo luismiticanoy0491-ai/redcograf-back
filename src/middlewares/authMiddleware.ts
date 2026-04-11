@@ -9,23 +9,41 @@ export const verifyTokenAndTenant = (req: any, res: any, next: any) => {
   const token = authHeader.split(' ')[1]; // "Bearer token..."
   if (!token) return res.status(403).json({ error: 'Token inválido' });
 
-  jwt.verify(token, process.env.JWT_SECRET || 'super_secret_key_development', (err: any, decoded: any) => {
+  if (!process.env.JWT_SECRET) {
+    console.error("CRITICAL ERROR: JWT_SECRET environment variable is not defined!");
+    return res.status(500).json({ error: "Configuración de seguridad incompleta en el servidor." });
+  }
+
+  jwt.verify(token, process.env.JWT_SECRET, (err: any, decoded: any) => {
     if (err) {
       return res.status(401).json({ error: 'Token expirado o inválido' });
     }
 
-    // Parche compatibilidad: Si es un token viejo (previo a SaaS), forzamos empresa 1 local.
-    if (!decoded.empresa_id) {
-       decoded.empresa_id = 1;
+    // Seguridad SaaS activa: Ya no permitimos tokens sin empresa_id (excepto superadmins si aplica)
+    if (!decoded.empresa_id && decoded.role !== 'superadmin') {
+       return res.status(401).json({ error: 'Token no contiene identificación de empresa (Tenant ID missing)'});
     }
     
     req.user = decoded; // { id, role, username, empresa_id }
 
-    // Si la ruta no es super-admin, requerimos empresa_id
-    if (decoded.role !== 'superadmin' && !decoded.empresa_id) {
-       return res.status(401).json({ error: 'Usuario incompatible con arquitectura SaaS (Sin Empresa Asignada)'});
-    }
-
     next();
+  });
+};
+
+/**
+ * Middleware para rutas críticas de SuperAdministrador SaaS.
+ * Restringe el acceso únicamente a usuarios con rol 'superadmin' 
+ * que pertenezcan a la Empresa Matriz (ID 1).
+ */
+export const verifySuperAdmin = (req: any, res: any, next: any) => {
+  verifyTokenAndTenant(req, res, () => {
+    if (req.user.role === 'superadmin' && parseInt(req.user.empresa_id) === 1) {
+      next();
+    } else {
+      console.warn(`[INTENTO ACCESO SUPERADMIN]: Usuario ${req.user.username} intentó acceder sin privilegios suficientes.`);
+      res.status(403).json({ 
+        error: "Acceso Denegado. No autorizado. Requiere rol superadmin y pertenecer a la empresa autorizada." 
+      });
+    }
   });
 };

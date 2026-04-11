@@ -1,46 +1,55 @@
 import express from "express";
 import connection from "../conection";
+import { verifyTokenAndTenant } from "../middlewares/authMiddleware";
 
 const router = express.Router();
 
-// Obtener datos resumidos para el Dashboard Central
-router.get("/resumen", (req, res) => {
-  // Query principal para obtener totales
+// Blindaje de seguridad y aislamiento por tienda
+router.use(verifyTokenAndTenant);
+
+// Obtener datos resumidos para el Dashboard Central (Aislado por empresa)
+router.get("/resumen", (req: any, res: any) => {
+  const empresa_id = req.user.empresa_id;
+
+  // Query principal filtrada por empresa
   const queryGlobal = `
     SELECT 
       SUM(cantidad * precio_compra) AS total_invertido,
       SUM(cantidad * precio_venta) AS ganancia_proyectada,
       SUM(cantidad) AS total_articulos
-    FROM productos;
+    FROM productos
+    WHERE empresa_id = ? AND es_servicio = 0;
   `;
 
-  // Query para obtener desglose de inventario por categoría
+  // Categorías filtradas por empresa
   const queryCategorias = `
     SELECT 
       categoria, 
       SUM(cantidad * precio_compra) AS valor_invertido,
+      SUM(cantidad * precio_venta) AS valor_venta,
       SUM(cantidad) as cantidad_articulos
     FROM productos
+    WHERE empresa_id = ? AND es_servicio = 0
     GROUP BY categoria
     ORDER BY valor_invertido DESC;
   `;
 
-  // Query para alertas de bajo stock (< 5)
+  // Alertas de bajo stock filtradas por empresa
   const queryBajoStock = `
     SELECT id, referencia, nombre, categoria, cantidad 
     FROM productos 
-    WHERE cantidad < 5
+    WHERE empresa_id = ? AND cantidad < 5 AND es_servicio = 0
     ORDER BY cantidad ASC
     LIMIT 20;
   `;
 
-  connection.query(queryGlobal, (err, resultGlobal) => {
+  connection.query(queryGlobal, [empresa_id], (err, resultGlobal: any) => {
     if (err) return res.status(500).json({ error: "Error obteniendo datos globales" });
     
-    connection.query(queryCategorias, (err, resultCategorias) => {
+    connection.query(queryCategorias, [empresa_id], (err, resultCategorias: any) => {
       if (err) return res.status(500).json({ error: "Error obteniendo categorías" });
       
-      connection.query(queryBajoStock, (err, resultBajoStock) => {
+      connection.query(queryBajoStock, [empresa_id], (err, resultBajoStock: any) => {
         if (err) return res.status(500).json({ error: "Error obteniendo bajo stock" });
         
         res.json({

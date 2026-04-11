@@ -1,100 +1,112 @@
 import express from "express";
 import connection from "../conection";
+import { verifyTokenAndTenant } from "../middlewares/authMiddleware";
 
 const router = express.Router();
 
+// Todas las rutas de pagos requieren aislamiento por Empresa (Tenant)
+router.use(verifyTokenAndTenant);
+
 // Fetch payroll data for a specific month and year
-router.get("/", (req, res) => {
+router.get("/", async (req: any, res: any) => {
+  const empresa_id = req.user.empresa_id;
   const { mes, anio } = req.query;
   
+  console.log(`[DEBUG] GET /pagos recibida. Empresa: ${empresa_id}, Mes: ${mes}, Año: ${anio}`);
+  
   if (!mes || !anio) {
-    return res.status(400).json({ error: "Parámetros 'mes' y 'anio' son requeridos." });
+    return res.status(400).json({ error: "Debe seleccionar un mes y año válidos." });
   }
 
-  const queryCajeros = `SELECT * FROM cajeros;`;
-  const queryVentas = `
-    SELECT cajero_id, SUM(total) as total_ventas 
-    FROM facturas_venta 
-    WHERE MONTH(fecha) = ? AND YEAR(fecha) = ? 
-    GROUP BY cajero_id;
-  `;
-  const queryPagos = `
-    SELECT * FROM pagos_empleados 
-    WHERE mes = ? AND anio = ?;
-  `;
+  try {
+    const queryCajeros = `SELECT * FROM cajeros WHERE empresa_id = ?;`;
+    const queryVentas = `
+      SELECT cajero_id, SUM(total) as total_ventas 
+      FROM facturas_venta 
+      WHERE empresa_id = ? AND MONTH(fecha) = ? AND YEAR(fecha) = ? 
+      GROUP BY cajero_id;
+    `;
+    const queryPagos = `
+      SELECT * FROM pagos_empleados 
+      WHERE empresa_id = ? AND mes = ? AND anio = ?;
+    `;
 
-  connection.query(queryCajeros, (err: any, cajeros: any[]) => {
-    if (err) return res.status(500).json({ error: err.message });
-    
-    connection.query(queryVentas, [mes, anio], (err: any, ventas: any[]) => {
-      if (err) return res.status(500).json({ error: err.message });
+    const [cajeros] = await connection.promise().query(queryCajeros, [empresa_id]);
+    const [ventas] = await connection.promise().query(queryVentas, [empresa_id, mes, anio]);
+    const [pagos] = await connection.promise().query(queryPagos, [empresa_id, mes, anio]);
 
-      connection.query(queryPagos, [mes, anio], (err: any, pagos: any[]) => {
-        if (err) return res.status(500).json({ error: err.message });
+    const nomina = (cajeros as any[]).map(cajero => {
+      const ventaCajero = (ventas as any[]).find(v => v.cajero_id === cajero.id);
+      const totalVentas = ventaCajero ? parseFloat(ventaCajero.total_ventas) : 0;
+      
+      let comisiones = 0;
+      if (cajero.paga_comisiones) {
+        comisiones = totalVentas * (parseFloat(cajero.porcentaje_comision) / 100);
+      }
 
-        const nomina = cajeros.map(cajero => {
-          const ventaCajero = ventas.find(v => v.cajero_id === cajero.id);
-          const totalVentas = ventaCajero ? parseFloat(ventaCajero.total_ventas) : 0;
-          
-          let comisiones = 0;
-          if (cajero.paga_comisiones) {
-            comisiones = totalVentas * (parseFloat(cajero.porcentaje_comision) / 100);
-          }
+      const salario_base = parseFloat(cajero.salario) || 0;
+      const total_a_pagar = salario_base + comisiones;
 
-          const salario_base = parseFloat(cajero.salario) || 0;
-          const total_a_pagar = salario_base + comisiones;
+      const pagoRegistrado = (pagos as any[]).find(p => p.cajero_id === cajero.id);
+      const estado = pagoRegistrado ? "Pagado" : "Pendiente";
 
-          const pagoRegistrado = pagos.find(p => p.cajero_id === cajero.id);
-          const estado = pagoRegistrado ? "Pagado" : "Pendiente";
-
-          return {
-            cajero_id: cajero.id,
-            nombre: cajero.nombre,
-            documento: cajero.documento,
-            salario_base,
-            totalVentas,
-            porcentaje_comision: cajero.porcentaje_comision,
-            comisiones,
-            total_a_pagar,
-            estado,
-            fecha_pago: pagoRegistrado ? pagoRegistrado.fecha_pago : null,
-            pago_id: pagoRegistrado ? pagoRegistrado.id : null
-          };
-        });
-
-        res.json(nomina);
-      });
+      return {
+        cajero_id: cajero.id,
+        nombre: cajero.nombre,
+        documento: cajero.documento,
+        salario_base,
+        totalVentas,
+        porcentaje_comision: cajero.porcentaje_comision,
+        comisiones,
+        total_a_pagar,
+        estado,
+        fecha_pago: pagoRegistrado ? pagoRegistrado.fecha_pago : null,
+        pago_id: pagoRegistrado ? pagoRegistrado.id : null
+      };
     });
-  });
+
+    res.json(nomina);
+  } catch (err: any) {
+    console.error("Error en GET /pagos:", err);
+    res.status(500).json({ 
+        error: "Error interno al procesar la nómina.", 
+        details: err.message,
+        sqlState: err.sqlState 
+    });
+  }
 });
 
 // Mark payroll as paid
-router.post("/", (req, res) => {
+router.post("/", (req: any, res: any) => {
+  const empresa_id = req.user.empresa_id;
   const { cajero_id, mes, anio, salario_base, comisiones, total_pagado, metodo_pago } = req.body;
   
   if (!cajero_id || !mes || !anio) {
-    return res.status(400).json({ error: "Faltan datos requeridos." });
+    return res.status(400).json({ error: "Faltan datos para procesar el pago." });
   }
 
   // Check if already paid
-  const checkQuery = `SELECT id FROM pagos_empleados WHERE cajero_id = ? AND mes = ? AND anio = ?`;
-  connection.query(checkQuery, [cajero_id, mes, anio], (err: any, results: any[]) => {
-    if (err) return res.status(500).json({ error: err.message });
+  const checkQuery = `SELECT id FROM pagos_empleados WHERE empresa_id = ? AND cajero_id = ? AND mes = ? AND anio = ?`;
+  connection.query(checkQuery, [empresa_id, cajero_id, mes, anio], (err: any, results: any[]) => {
+    if (err) return res.status(500).json({ error: "Ocurrió un error al verificar duplicados. Inténtelo de nuevo." });
     
     if (results.length > 0) {
-      return res.status(400).json({ error: "Este empleado ya tiene un pago registrado para ese mes y año." });
+      return res.status(400).json({ error: "Este empleado ya tiene un pago registrado para este periodo." });
     }
 
     const insertQuery = `
-      INSERT INTO pagos_empleados (cajero_id, mes, anio, salario_base, comisiones, total_pagado, metodo_pago)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO pagos_empleados (empresa_id, cajero_id, mes, anio, salario_base, comisiones, total_pagado, metodo_pago)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `;
 
     connection.query(
       insertQuery,
-      [cajero_id, mes, anio, salario_base || 0, comisiones || 0, total_pagado || 0, metodo_pago || 'Efectivo'],
+      [empresa_id, cajero_id, mes, anio, salario_base || 0, comisiones || 0, total_pagado || 0, metodo_pago || 'Efectivo'],
       (err: any, result: any) => {
-        if (err) return res.status(500).json({ error: err.message });
+        if (err) {
+            console.error("Error en pagos_empleados:", err);
+            return res.status(500).json({ error: "No se pudo registrar el pago debido a un fallo en el sistema. Soporte técnico ha sido notificado." });
+        }
         res.status(201).json({ success: true, id: result.insertId });
       }
     );

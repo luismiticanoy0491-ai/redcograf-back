@@ -12,29 +12,24 @@ connection.connect((err) => {
   
   const sql = `
     CREATE TABLE IF NOT EXISTS empresa_config (
-      id INT PRIMARY KEY DEFAULT 1,
+      empresa_id INT PRIMARY KEY,
       nombre_empresa VARCHAR(255) NOT NULL,
       nit VARCHAR(100) NOT NULL,
       direccion VARCHAR(255) NOT NULL,
+      telefono VARCHAR(50) DEFAULT '',
       correo VARCHAR(100) NOT NULL,
-      resolucion TEXT NOT NULL
+      resolucion TEXT NOT NULL,
+      permitir_venta_negativa BOOLEAN DEFAULT 1,
+      representante_legal VARCHAR(255) DEFAULT '',
+      logo LONGTEXT NULL,
+      FOREIGN KEY (empresa_id) REFERENCES empresas_suscritas(id) ON DELETE CASCADE
     );
   `;
   
   connection.query(sql, (err) => {
     if (err) throw err;
     console.log("Tabla de empresa configurada.");
-    
-    const insertSQL = `
-      INSERT IGNORE INTO empresa_config (id, nombre_empresa, nit, direccion, correo, resolucion) 
-      VALUES (1, "MI EMPRESA S.A.S", "NIT 000.000.000-0", "Ciudad, País", "correo@empresa.com", "Resolución DIAN XXXXXX no definida aún.")
-    `;
-    
-    connection.query(insertSQL, (err) => {
-      if (err) throw err;
-      console.log("Datos por defecto inyectados.");
-      connection.end();
-    });
+    connection.end();
   });
 });
 

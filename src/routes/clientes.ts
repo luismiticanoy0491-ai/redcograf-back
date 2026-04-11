@@ -38,4 +38,28 @@ router.delete("/:id", (req: any, res: any) => {
   });
 });
 
+router.put("/:id", (req: any, res: any) => {
+  const empresa_id = req.user.empresa_id;
+  const clienteId = req.params.id;
+  const { nombre, documento, telefono, correo, direccion } = req.body;
+
+  if (!nombre) return res.status(400).json({ error: "Nombre es requerido" });
+
+  const query = `
+    UPDATE clientes 
+    SET nombre = ?, documento = ?, telefono = ?, correo = ?, direccion = ?
+    WHERE id = ? AND empresa_id = ?
+  `;
+
+  connection.query(
+    query,
+    [nombre, documento || '', telefono || '', correo || '', direccion || '', clienteId, empresa_id],
+    (err: any, results: any) => {
+      if (err) return res.status(500).json({ error: err.message });
+      if (results.affectedRows === 0) return res.status(404).json({ error: "Cliente no encontrado" });
+      res.json({ success: true, message: "Cliente actualizado" });
+    }
+  );
+});
+
 export default router;
