@@ -9,7 +9,7 @@ const router = express.Router();
 // Patch table to migrate old single-tenant 'administradores' into 'usuarios_plataforma' temporarily on load
 connection.query(
   "INSERT IGNORE INTO usuarios_plataforma (empresa_id, username, password_hash, role) SELECT 1, username, password_hash, role FROM administradores;",
-  (err: any) => { if(err) console.log("Migración ignorada: " + err.message); }
+  (err: any) => { if (err) console.log("Migración ignorada: " + err.message); }
 );
 
 // REGISTRO PÚBLICO SAAS (AUTO-SERVICIO)
@@ -40,7 +40,7 @@ router.post("/registro-empresa", async (req: any, res: any) => {
     try {
       const promisePool = connection.promise();
       const dbConn = await promisePool.getConnection();
-      
+
       try {
         await dbConn.beginTransaction();
 
@@ -74,29 +74,29 @@ router.post("/registro-empresa", async (req: any, res: any) => {
         // 3. Notificación "push/log" para Súper Administrador
         console.log(`[ALERTA SAAS]: 🎉 ¡Nueva empresa registrada!: ${nombre_comercial} (Admin: ${username}). 7 Días Gratis activados.`);
 
-        res.status(201).json({ 
-          success: true, 
+        res.status(201).json({
+          success: true,
           message: "¡Tienda registrada con éxito! Disfruta de tus 7 días gratis.",
           empresa_id
         });
       } catch (txError: any) {
-         await dbConn.rollback();
-         dbConn.release();
-         console.error("[ERROR CRÍTICO REGISTRO SAAS]:", txError);
-         
-         const errorMessage = txError.code === 'ER_DUP_ENTRY' 
-            ? "Ya existe una configuración activa o usuario con datos similares. Verifique los detalles."
-            : `Error técnico: ${txError.message || "Fallo en transacción"}`;
+        await dbConn.rollback();
+        dbConn.release();
+        console.error("[ERROR CRÍTICO REGISTRO SAAS]:", txError);
 
-         res.status(500).json({ 
-            error: "No pudimos crear tu tienda SaaS.",
-            detalle: errorMessage,
-            code: txError.code
-         });
+        const errorMessage = txError.code === 'ER_DUP_ENTRY'
+          ? "Ya existe una configuración activa o usuario con datos similares. Verifique los detalles."
+          : `Error técnico: ${txError.message || "Fallo en transacción"}`;
+
+        res.status(500).json({
+          error: "No pudimos crear tu tienda SaaS.",
+          detalle: errorMessage,
+          code: txError.code
+        });
       }
     } catch (error: any) {
-       console.error("Error Obteniendo Conexión:", error);
-       res.status(500).json({ error: "Error conectando a Base de Datos." });
+      console.error("Error Obteniendo Conexión:", error);
+      res.status(500).json({ error: "Error conectando a Base de Datos." });
     }
   });
 });
@@ -104,7 +104,7 @@ router.post("/registro-empresa", async (req: any, res: any) => {
 // Registrar nuevo usuario interno (Cajeros de una tienda) - PROTEGIDO
 router.post("/registro", verifyTokenAndTenant, async (req: any, res: any) => {
   const { empresa_id, username, password, role } = req.body;
-  
+
   // Seguridad: Solo el dueño o un admin de la misma empresa puede crear usuarios
   if (req.user.role !== 'dueño' && req.user.role !== 'superadmin' && req.user.role !== 'admin') {
     return res.status(403).json({ error: "No tienes permisos para crear usuarios." });
@@ -145,7 +145,7 @@ router.post("/login", (req: any, res: any) => {
     "SELECT u.*, e.estado as estado_empresa, e.fecha_vencimiento_suscripcion, e.nombre_comercial FROM usuarios_plataforma u LEFT JOIN empresas_suscritas e ON u.empresa_id = e.id WHERE u.username = ?",
     [username],
     async (err: any, results: any[]) => {
-      if (err) return res.status(500).json({ error: "Error de BD" });
+      if (err) return res.status(500).json({ error: "Error de conexion a la base de datos" });
       if (results.length === 0) return res.status(401).json({ error: "Credenciales inválidas" });
 
       const admin = results[0];
@@ -154,18 +154,18 @@ router.post("/login", (req: any, res: any) => {
 
       const hoy = new Date();
       const fecVen = new Date(admin.fecha_vencimiento_suscripcion);
-      
+
       if (admin.role !== 'superadmin' && fecVen < hoy) {
-        return res.status(403).json({ 
-          error: "Suscripción Expirada", 
+        return res.status(403).json({
+          error: "Suscripción Expirada",
           reason: "expired",
           empresa_id: admin.empresa_id
         });
       }
 
       if (!process.env.JWT_SECRET) {
-         console.error("JWT_SECRET missing in ENV!");
-         return res.status(500).json({ error: "Error de configuración de seguridad." });
+        console.error("JWT_SECRET missing in ENV!");
+        return res.status(500).json({ error: "Error de configuración de seguridad." });
       }
 
       const token = jwt.sign(
@@ -174,7 +174,7 @@ router.post("/login", (req: any, res: any) => {
         { expiresIn: '8h' }
       );
 
-      res.json({ success: true, token, role: admin.role, username: admin.username, empresa_id: admin.empresa_id, nombre_comercial: admin.nombre_comercial }); 
+      res.json({ success: true, token, role: admin.role, username: admin.username, empresa_id: admin.empresa_id, nombre_comercial: admin.nombre_comercial });
     }
   );
 });
@@ -198,7 +198,7 @@ router.post("/solicitar-codigo", (req: any, res: any) => {
     if (results.length === 0) return res.status(404).json({ error: "No se encontró un usuario con ese NIT y Usuario" });
 
     const { correo_contacto, telefono_contacto } = results[0];
-    
+
     // Obscurecer datos para seguridad
     const obscureEmail = (email: string) => {
       if (!email) return "No registrado";
@@ -262,7 +262,7 @@ router.post("/enviar-codigo", (req: any, res: any) => {
 // 3. Validar Código
 router.post("/verificar-codigo", (req: any, res: any) => {
   const { username, nit, codigo } = req.body;
-  
+
   if (!codigo) return res.status(400).json({ error: "Código requerido" });
 
   const query = `
@@ -311,10 +311,10 @@ router.post("/restablecer-final", async (req: any, res: any) => {
         [hash, usuario_id],
         (updateErr) => {
           if (updateErr) return res.status(500).json({ error: "Error al actualizar contraseña" });
-          
+
           // Marcar OTP como usado
           connection.query("UPDATE otp_verifications SET usado = 1 WHERE id = ?", [otpId]);
-          
+
           res.json({ success: true, message: "Contraseña restaurada exitosamente" });
         }
       );
