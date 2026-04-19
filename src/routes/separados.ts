@@ -11,9 +11,10 @@ router.use(verifyTokenAndTenant);
 router.get("/", (req: any, res: any) => {
   const empresa_id = req.user.empresa_id;
   const sql = `
-    SELECT s.*, c.nombre as cliente_nombre, c.documento as cliente_documento 
+    SELECT s.*, c.nombre as cliente_nombre, c.documento as cliente_documento, ca.nombre as cajero_nombre
     FROM separados s
     LEFT JOIN clientes c ON s.cliente_id = c.id
+    LEFT JOIN cajeros ca ON s.cajero_id = ca.id
     WHERE s.empresa_id = ?
     ORDER BY s.fecha_creacion DESC
   `;
@@ -28,14 +29,22 @@ router.get("/:id", (req: any, res: any) => {
   const empresa_id = req.user.empresa_id;
   const { id } = req.params;
   pool.query(`
-    SELECT s.*, c.nombre as cliente_nombre, c.documento as cliente_documento 
+    SELECT s.*, c.nombre as cliente_nombre, c.documento as cliente_documento, ca.nombre as cajero_nombre
     FROM separados s 
     LEFT JOIN clientes c ON s.cliente_id = c.id 
+    LEFT JOIN cajeros ca ON s.cajero_id = ca.id
     WHERE s.id = ? AND s.empresa_id = ?
   `, [id, empresa_id], (err: any, sepRes: any) => {
     if (err || sepRes.length === 0) return res.status(404).json({ error: "No encontrado" });
     
-    pool.query("SELECT * FROM abonos_separados WHERE separado_id = ? AND empresa_id = ? ORDER BY fecha_abono ASC", [id, empresa_id], (err2: any, abonosRes: any) => {
+    const abonosSql = `
+      SELECT a.*, c.nombre as cajero_nombre, a.fecha_pago as fecha_abono
+      FROM abonos_separados a
+      LEFT JOIN cajeros c ON a.cajero_id = c.id
+      WHERE a.separado_id = ? AND a.empresa_id = ? 
+      ORDER BY a.fecha_pago ASC
+    `;
+    pool.query(abonosSql, [id, empresa_id], (err2: any, abonosRes: any) => {
       res.json({
         separado: sepRes[0],
         abonos: abonosRes || []
@@ -63,8 +72,8 @@ router.post("/", async (req: any, res: any) => {
 
     // 1. Crear el registro del Separado (Privado por empresa_id)
     const [sepResult]: any = await conn.query(
-      "INSERT INTO separados (empresa_id, cliente_id, total, saldo_pendiente, detalles_json, estado) VALUES (?, ?, ?, ?, ?, 'Pendiente')",
-      [empresa_id, cliente_id, total, saldo_pendiente, JSON.stringify(detalles)]
+      "INSERT INTO separados (empresa_id, cliente_id, cajero_id, total, saldo_pendiente, detalles_json, estado) VALUES (?, ?, ?, ?, ?, ?, 'Pendiente')",
+      [empresa_id, cliente_id, req.body.cajero_id || null, total, saldo_pendiente, JSON.stringify(detalles)]
     );
     const separadoId = sepResult.insertId;
 
@@ -107,13 +116,20 @@ router.post("/", async (req: any, res: any) => {
       const initEfec = req.body.pago_efectivo || (initMetodo === 'Efectivo' ? abono_inicial : 0);
       const initTrans = req.body.pago_transferencia || (initMetodo === 'Transferencia' ? abono_inicial : 0);
 
+      const initCajero = req.body.cajero_id || null;
+
       await conn.query(
-        "INSERT INTO abonos_separados (empresa_id, separado_id, monto, metodo_pago, pago_efectivo, pago_transferencia) VALUES (?, ?, ?, ?, ?, ?)",
-        [empresa_id, separadoId, abono_inicial, initMetodo, initEfec, initTrans]
+        "INSERT INTO abonos_separados (empresa_id, separado_id, cajero_id, monto, metodo_pago, pago_efectivo, pago_transferencia) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [empresa_id, separadoId, initCajero, abono_inicial, initMetodo, initEfec, initTrans]
       );
     }
 
     await conn.commit();
+    // Notificar por Socket.io
+    if (req.io) {
+       req.io.to(`empresa_${empresa_id}`).emit('separado_created', { id: separadoId, cliente_id });
+    }
+
     res.status(201).json({ 
         success: true, 
         message: "¡Separado registrado y stock reservado con éxito!", 
@@ -157,15 +173,23 @@ router.post("/:id/abonos", async (req: any, res: any) => {
     const efec = req.body.pago_efectivo || (met === 'Efectivo' ? monto : 0);
     const trans = req.body.pago_transferencia || (met === 'Transferencia' ? monto : 0);
 
+    const cajId = req.body.cajero_id || null;
+
     await conn.query(
-      "INSERT INTO abonos_separados (empresa_id, separado_id, monto, metodo_pago, pago_efectivo, pago_transferencia) VALUES (?, ?, ?, ?, ?, ?)", 
-      [empresa_id, id, monto, met, efec, trans]
+      "INSERT INTO abonos_separados (empresa_id, separado_id, cajero_id, monto, metodo_pago, pago_efectivo, pago_transferencia) VALUES (?, ?, ?, ?, ?, ?, ?)", 
+      [empresa_id, id, cajId, monto, met, efec, trans]
     );
     
     // 2. Actualizar Saldo atómicamente
     await conn.query("UPDATE separados SET saldo_pendiente = saldo_pendiente - ? WHERE id = ? AND empresa_id = ?", [monto, id, empresa_id]);
 
     await conn.commit();
+    
+    // Notificar por Socket
+    if (req.io) {
+       req.io.to(`empresa_${empresa_id}`).emit('abono_added', { separado_id: id, monto });
+    }
+
     res.json({ success: true, message: "Abono registrado correctamente", nuevo_saldo: saldo_pendiente - monto });
 
   } catch (error: any) {
@@ -227,6 +251,12 @@ router.put("/:id/completar", async (req: any, res: any) => {
     await conn.query("UPDATE separados SET estado = 'Pagado', saldo_pendiente = 0 WHERE id = ? AND empresa_id = ?", [id, empresa_id]);
 
     await conn.commit();
+
+    // Notificar por Socket
+    if (req.io) {
+       req.io.to(`empresa_${empresa_id}`).emit('separado_updated', { id, estado: 'Pagado' });
+    }
+
     res.json({ success: true, message: "Separado facturado con éxito", factura_id: facturaId });
 
   } catch (error: any) {
@@ -278,6 +308,12 @@ router.put("/:id/anular", async (req: any, res: any) => {
     await conn.query("UPDATE separados SET estado = 'Anulado' WHERE id = ? AND empresa_id = ?", [id, empresa_id]);
 
     await conn.commit();
+
+    // Notificar por Socket
+    if (req.io) {
+       req.io.to(`empresa_${empresa_id}`).emit('separado_updated', { id, estado: 'Anulado' });
+    }
+
     res.json({ success: true, message: "Separado anulado y stock liberado correctamente" });
 
   } catch (error: any) {

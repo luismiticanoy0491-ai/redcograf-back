@@ -11,7 +11,7 @@ router.use(verifyTokenAndTenant);
 router.put("/:id", async (req: any, res: any) => {
   const { empresa_id, role, username } = req.user;
   const productoId = req.params.id;
-  const { referencia, nombre, categoria, cantidad, precio_compra, porcentaje_ganancia, precio_venta, es_servicio, permitir_venta_negativa } = req.body;
+  const { referencia, nombre, categoria, cantidad, precio_compra, porcentaje_ganancia, precio_venta, es_servicio, permitir_venta_negativa, iva_porcentaje, fecha_vencimiento } = req.body;
 
   const isSuper = role === 'superadmin';
   const promiseDb = connection.promise();
@@ -27,10 +27,12 @@ router.put("/:id", async (req: any, res: any) => {
 
     const finalCantidad = es_servicio ? 0 : cantidad;
 
+    const iva_porcentaje = parseFloat(req.body.iva_porcentaje) || 0;
+    
     // 2. Ejecutar Update
     const query = isSuper
-      ? `UPDATE productos SET referencia = ?, nombre = ?, categoria = ?, cantidad = ?, precio_compra = ?, porcentaje_ganancia = ?, precio_venta = ?, es_servicio = ?, permitir_venta_negativa = ? WHERE id = ?`
-      : `UPDATE productos SET referencia = ?, nombre = ?, categoria = ?, cantidad = ?, precio_compra = ?, porcentaje_ganancia = ?, precio_venta = ?, es_servicio = ?, permitir_venta_negativa = ? WHERE id = ? AND empresa_id = ?`;
+      ? `UPDATE productos SET referencia = ?, nombre = ?, categoria = ?, cantidad = ?, precio_compra = ?, porcentaje_ganancia = ?, precio_venta = ?, es_servicio = ?, permitir_venta_negativa = ?, iva_porcentaje = ?, fecha_vencimiento = ? WHERE id = ?`
+      : `UPDATE productos SET referencia = ?, nombre = ?, categoria = ?, cantidad = ?, precio_compra = ?, porcentaje_ganancia = ?, precio_venta = ?, es_servicio = ?, permitir_venta_negativa = ?, iva_porcentaje = ?, fecha_vencimiento = ? WHERE id = ? AND empresa_id = ?`;
 
     const params = [
       referencia || '', 
@@ -42,6 +44,8 @@ router.put("/:id", async (req: any, res: any) => {
       precio_venta, 
       es_servicio ? 1 : 0, 
       permitir_venta_negativa !== undefined ? (permitir_venta_negativa ? 1 : 0) : 1,
+      iva_porcentaje > 1000 ? 0 : iva_porcentaje, // Clamp safety
+      fecha_vencimiento || null,
       productoId
     ];
     if (!isSuper) params.push(empresa_id);
@@ -58,6 +62,20 @@ router.put("/:id", async (req: any, res: any) => {
     }
 
     await conn.commit();
+    
+    // Notificar por Socket.io en tiempo real
+    if (req.io) {
+       req.io.to(`empresa_${empresa_id}`).emit('product_updated', {
+          id: productoId,
+          referencia,
+          nombre,
+          precio_venta,
+          precio_compra,
+          iva_porcentaje: req.body.iva_porcentaje || 0,
+          cantidad: finalCantidad
+       });
+    }
+
     res.json({ success: true, message: "Producto actualizado correctamente" });
   } catch (err: any) {
     await conn.rollback();
@@ -116,30 +134,59 @@ router.delete("/:id", async (req: any, res: any) => {
 
 router.get("/", (req: any, res: any) => {
   let queryEmpresaId = req.user.empresa_id;
-  
-  const { tipo } = req.query;
+  const { tipo, page = 1, limit = 50, search = '' } = req.query;
+  const offset = (parseInt(page as string) - 1) * parseInt(limit as string);
+
   let baseQuery = "SELECT * FROM productos WHERE empresa_id = ?";
+  let countQuery = "SELECT COUNT(*) as total FROM productos WHERE empresa_id = ?";
   const params: any[] = [queryEmpresaId];
 
   if (req.user.role === 'superadmin' && !req.query.empresa_id) {
-    baseQuery = "SELECT * FROM productos";
-    params.pop(); // Remove empresa_id if superadmin is viewing global
+    baseQuery = "SELECT * FROM productos WHERE 1=1";
+    countQuery = "SELECT COUNT(*) as total FROM productos WHERE 1=1";
+    params.pop();
   }
 
   if (tipo === 'servicio') {
-    baseQuery += (baseQuery.includes('WHERE') ? " AND " : " WHERE ") + "es_servicio = 1";
+    const clause = (baseQuery.includes('WHERE') ? " AND " : " WHERE ") + "es_servicio = 1";
+    baseQuery += clause;
+    countQuery += clause;
   } else if (tipo === 'producto') {
-    baseQuery += (baseQuery.includes('WHERE') ? " AND " : " WHERE ") + "es_servicio = 0";
+    const clause = (baseQuery.includes('WHERE') ? " AND " : " WHERE ") + "es_servicio = 0";
+    baseQuery += clause;
+    countQuery += clause;
   }
 
-  baseQuery += " ORDER BY id DESC";
+  if (search) {
+    const searchClause = " AND (nombre LIKE ? OR referencia LIKE ?)";
+    baseQuery += searchClause;
+    countQuery += searchClause;
+    const searchParam = `%${search}%`;
+    params.push(searchParam, searchParam);
+  }
 
-  connection.query(baseQuery, params, (err: any, results: any) => {
-    if (err) {
-      console.error("Error al obtener productos:", err);
-      return res.status(500).json({ error: "Error en el servidor" });
+  baseQuery += " ORDER BY id DESC LIMIT ? OFFSET ?";
+  const queryParams = [...params, parseInt(limit as string), offset];
+
+  connection.query(countQuery, params, (countErr: any, countRes: any) => {
+    if (countErr) {
+      console.error("Error counting products:", countErr);
+      return res.status(500).json({ error: "Error counting products" });
     }
-    res.json(results);
+    const total = countRes[0].total;
+
+    connection.query(baseQuery, queryParams, (err: any, results: any) => {
+      if (err) {
+        console.error("Error obtaining products:", err);
+        return res.status(500).json({ error: "Error obtaining products" });
+      }
+      res.json({
+        data: results,
+        total,
+        page: parseInt(page as string),
+        last_page: Math.ceil(total / parseInt(limit as string))
+      });
+    });
   });
 });
 
@@ -167,11 +214,11 @@ router.get("/buscar/:referencia", (req: any, res: any) => {
 // Guardado de un producto individual
 router.post("/", (req: any, res: any) => {
   const empresa_id = req.user.empresa_id;
-  const { referencia, nombre, categoria, cantidad, precio_compra, porcentaje_ganancia, precio_venta, es_servicio, permitir_venta_negativa } = req.body;
+  const { referencia, nombre, categoria, cantidad, precio_compra, porcentaje_ganancia, precio_venta, es_servicio, permitir_venta_negativa, iva_porcentaje, fecha_vencimiento } = req.body;
   
   const query = `
-    INSERT INTO productos (empresa_id, referencia, nombre, categoria, cantidad, precio_compra, porcentaje_ganancia, precio_venta, es_servicio, permitir_venta_negativa) 
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO productos (empresa_id, referencia, nombre, categoria, cantidad, precio_compra, porcentaje_ganancia, precio_venta, es_servicio, permitir_venta_negativa, iva_porcentaje, fecha_vencimiento) 
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `;
   
     const finalCantidad = es_servicio ? 0 : (cantidad || 0);
@@ -188,7 +235,9 @@ router.post("/", (req: any, res: any) => {
       porcentaje_ganancia, 
       precio_venta, 
       es_servicio ? 1 : 0, 
-      permitir_venta_negativa !== undefined ? (permitir_venta_negativa ? 1 : 0) : 1
+      permitir_venta_negativa !== undefined ? (permitir_venta_negativa ? 1 : 0) : 1,
+      parseFloat(req.body.iva_porcentaje) || 0,
+      req.body.fecha_vencimiento || null
     ], 
     (err: any, results: any) => {
       if (err) {
@@ -204,6 +253,20 @@ router.post("/", (req: any, res: any) => {
           [newId, empresa_id, finalCantidad, finalCantidad, req.user.username || 'Admin'],
           (errK) => { if (errK) console.error("Kardex Init Error:", errK); }
         );
+      }
+
+      // Notificar a todos los dispositivos de la empresa
+      if (req.io) {
+        req.io.to(`empresa_${empresa_id}`).emit('product_updated', {
+          id: newId,
+          referencia: referencia || '',
+          nombre,
+          categoria,
+          precio_venta,
+          precio_compra,
+          iva_porcentaje: req.body.iva_porcentaje || 0,
+          cantidad: finalCantidad
+        });
       }
 
       res.status(201).json({ id: newId, empresa_id, referencia, nombre, categoria, cantidad, precio_compra, porcentaje_ganancia, precio_venta });
@@ -239,25 +302,25 @@ router.post("/batch", async (req: any, res: any) => {
           finalId = existing[0].id;
           stockAntes = existing[0].cantidad;
           const qUpdate = isServicio 
-            ? "UPDATE productos SET precio_compra = ?, precio_venta = ?, porcentaje_ganancia = ?, es_servicio = 1, permitir_venta_negativa = ? WHERE id = ? AND empresa_id = ?"
-            : "UPDATE productos SET cantidad = cantidad + ?, precio_compra = ?, precio_venta = ?, porcentaje_ganancia = ?, es_servicio = 0, permitir_venta_negativa = ? WHERE id = ? AND empresa_id = ?";
+            ? "UPDATE productos SET precio_compra = ?, precio_venta = ?, porcentaje_ganancia = ?, es_servicio = 1, permitir_venta_negativa = ?, fecha_vencimiento = ? WHERE id = ? AND empresa_id = ?"
+            : "UPDATE productos SET cantidad = cantidad + ?, precio_compra = ?, precio_venta = ?, porcentaje_ganancia = ?, es_servicio = 0, permitir_venta_negativa = ?, fecha_vencimiento = ? WHERE id = ? AND empresa_id = ?";
           
           const paramsUpdate = isServicio
-            ? [p.precio_compra, p.precio_venta, p.porcentaje_ganancia, p.permitir_venta_negativa !== undefined ? (p.permitir_venta_negativa ? 1 : 0) : 1, finalId, empresa_id]
-            : [cantIn, p.precio_compra, p.precio_venta, p.porcentaje_ganancia, p.permitir_venta_negativa !== undefined ? (p.permitir_venta_negativa ? 1 : 0) : 1, finalId, empresa_id];
+            ? [p.precio_compra, p.precio_venta, p.porcentaje_ganancia, p.permitir_venta_negativa !== undefined ? (p.permitir_venta_negativa ? 1 : 0) : 1, p.fecha_vencimiento || null, finalId, empresa_id]
+            : [cantIn, p.precio_compra, p.precio_venta, p.porcentaje_ganancia, p.permitir_venta_negativa !== undefined ? (p.permitir_venta_negativa ? 1 : 0) : 1, p.fecha_vencimiento || null, finalId, empresa_id];
 
           await conn.query(qUpdate, paramsUpdate);
         } else {
           const [result]: any = await conn.query(
-            "INSERT INTO productos (empresa_id, referencia, nombre, categoria, cantidad, precio_compra, porcentaje_ganancia, precio_venta, es_servicio, permitir_venta_negativa) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [empresa_id, p.referencia || '', p.nombre, p.categoria, cantIn, p.precio_compra, p.porcentaje_ganancia, p.precio_venta, isServicio ? 1 : 0, p.permitir_venta_negativa !== undefined ? (p.permitir_venta_negativa ? 1 : 0) : 1]
+            "INSERT INTO productos (empresa_id, referencia, nombre, categoria, cantidad, precio_compra, porcentaje_ganancia, precio_venta, es_servicio, permitir_venta_negativa, iva_porcentaje, fecha_vencimiento) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [empresa_id, p.referencia || '', p.nombre, p.categoria, cantIn, p.precio_compra, p.porcentaje_ganancia, p.precio_venta, isServicio ? 1 : 0, p.permitir_venta_negativa !== undefined ? (p.permitir_venta_negativa ? 1 : 0) : 1, p.iva_porcentaje || 0, p.fecha_vencimiento || null]
           );
           finalId = result.insertId;
         }
       } else {
         const [result]: any = await conn.query(
-            "INSERT INTO productos (empresa_id, referencia, nombre, categoria, cantidad, precio_compra, porcentaje_ganancia, precio_venta, es_servicio, permitir_venta_negativa) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [empresa_id, '', p.nombre, p.categoria, cantIn, p.precio_compra, p.porcentaje_ganancia, p.precio_venta, isServicio ? 1 : 0, p.permitir_venta_negativa !== undefined ? (p.permitir_venta_negativa ? 1 : 0) : 1]
+            "INSERT INTO productos (empresa_id, referencia, nombre, categoria, cantidad, precio_compra, porcentaje_ganancia, precio_venta, es_servicio, permitir_venta_negativa, iva_porcentaje, fecha_vencimiento) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [empresa_id, '', p.nombre, p.categoria, cantIn, p.precio_compra, p.porcentaje_ganancia, p.precio_venta, isServicio ? 1 : 0, p.permitir_venta_negativa !== undefined ? (p.permitir_venta_negativa ? 1 : 0) : 1, p.iva_porcentaje || 0, p.fecha_vencimiento || null]
           );
           finalId = result.insertId;
       }
@@ -275,6 +338,12 @@ router.post("/batch", async (req: any, res: any) => {
     }
     
     await conn.commit();
+
+    // Notificación Masiva por Sockets
+    if (req.io) {
+       req.io.to(`empresa_${empresa_id}`).emit('inventory_batch_updated', { empresa_id });
+    }
+
     res.status(201).json({ message: "Lote guardado y Kardex actualizado con éxito", affectedRows: productosData.length });
   } catch (err) {
     await conn.rollback();
@@ -333,6 +402,99 @@ router.put("/:id/ajustar", async (req: any, res: any) => {
   }
 });
 
+// Inyectar stock incremental desde un borrador (Tiempo Real)
+router.post("/inyectar-stock", async (req: any, res: any) => {
+  const empresa_id = req.user.empresa_id;
+  const { items } = req.body;
+
+  if (!Array.isArray(items) || items.length === 0) {
+    return res.status(400).json({ error: "No se proporcionaron ítems válidos." });
+  }
+
+  const promiseDb = connection.promise();
+  const conn = await promiseDb.getConnection();
+
+  try {
+    await conn.beginTransaction();
+
+    for (const item of items) {
+      const delta = parseFloat(item.delta) || 0;
+      if (delta <= 0) continue;
+
+      let product_id: number | null = null;
+      let stockAntes = 0;
+
+      // 1. Intentar encontrar el producto por referencia o nombre
+      let queryFind = "SELECT id, cantidad FROM productos WHERE empresa_id = ? AND ";
+      let paramsFind: any[] = [empresa_id];
+
+      if (item.referencia && item.referencia.trim() !== "") {
+        queryFind += "referencia = ? ";
+        paramsFind.push(item.referencia);
+      } else {
+        queryFind += "nombre = ? ";
+        paramsFind.push(item.nombre);
+      }
+      queryFind += " FOR UPDATE";
+
+      const [existing]: any = await conn.query(queryFind, paramsFind);
+
+      if (existing.length > 0) {
+        product_id = existing[0].id;
+        stockAntes = existing[0].cantidad;
+        // Actualizar stock
+        await conn.query(
+          "UPDATE productos SET cantidad = cantidad + ?, precio_compra = ?, precio_venta = ?, porcentaje_ganancia = ? WHERE id = ?",
+          [delta, item.precio_compra, item.precio_venta, item.porcentaje_ganancia, product_id]
+        );
+      } else {
+        // Crear producto nuevo si no existe
+        const [result]: any = await conn.query(
+          "INSERT INTO productos (empresa_id, referencia, nombre, categoria, cantidad, precio_compra, porcentaje_ganancia, precio_venta, es_servicio, permitir_venta_negativa, iva_porcentaje, fecha_vencimiento) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          [
+            empresa_id, 
+            item.referencia || '', 
+            item.nombre, 
+            item.categoria, 
+            delta, 
+            item.precio_compra, 
+            item.porcentaje_ganancia, 
+            item.precio_venta, 
+            item.es_servicio ? 1 : 0, 
+            item.permitir_venta_negativa !== undefined ? (item.permitir_venta_negativa ? 1 : 0) : 1,
+            item.iva_porcentaje || 0,
+            item.fecha_vencimiento || null
+          ]
+        );
+        product_id = result.insertId;
+      }
+
+      // 2. Registrar en Kardex
+      await conn.query(
+        "INSERT INTO kardex (producto_id, empresa_id, tipo_movimiento, cantidad_antes, cantidad_modificada, cantidad_despues, motivo, usuario_nombre, referencia) VALUES (?, ?, 'ENTRADA_BORRADOR', ?, ?, ?, 'Inyección incremental desde borrador', ?, ?)",
+        [
+          product_id, 
+          empresa_id, 
+          stockAntes, 
+          delta, 
+          stockAntes + delta, 
+          req.user.username || 'Sistema', 
+          item.referencia || 'S/REF'
+        ]
+      );
+    }
+
+    await conn.commit();
+    res.json({ success: true, message: "Stock inyectado correctamente." });
+  } catch (err: any) {
+    await conn.rollback();
+    console.error("Error al inyectar stock:", err);
+    res.status(500).json({ error: "Error interno al inyectar stock: " + err.message });
+  } finally {
+    conn.release();
+  }
+});
+
 // Revertir (restar) stock de un producto inyectado desde un borrador
 router.post("/revertir-stock", async (req: any, res: any) => {
   const empresa_id = req.user.empresa_id;
@@ -359,6 +521,22 @@ router.post("/revertir-stock", async (req: any, res: any) => {
   }
 });
 
+
+// Obtener categorías únicas por empresa
+router.get("/categorias", async (req: any, res: any) => {
+  const empresa_id = req.user.empresa_id;
+  try {
+    const [results]: any = await connection.promise().query(
+      "SELECT DISTINCT categoria FROM productos WHERE empresa_id = ? AND categoria IS NOT NULL AND categoria != '' ORDER BY categoria ASC",
+      [empresa_id]
+    );
+    const categorias = results.map((r: any) => r.categoria);
+    res.json(categorias);
+  } catch (err) {
+    console.error("Error al obtener categorías:", err);
+    res.status(500).json({ error: "Error al obtener categorías" });
+  }
+});
 
 export default router;
 

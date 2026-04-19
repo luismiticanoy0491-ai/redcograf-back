@@ -40,8 +40,10 @@ router.get("/download", (req, res) => {
 
       // Una vez compiladas / resueltas todas las solicitudes a la BD SQL
       if (queriesCompleted === tablas.length) {
-        const fecha = new Date().toISOString().split('T')[0]; // Formato universal YYYY-MM-DD
-        const horaSecudaria = new Date().getTime().toString().substring(7); // Token numérico de seguridad temporal
+        const d = new Date();
+        const pad = (n: number) => n.toString().padStart(2, '0');
+        const fecha = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; // Formato local YYYY-MM-DD
+        const horaSecudaria = d.getTime().toString().substring(7); // Token numérico de seguridad temporal
         const filename = `copia_seguridad_tienda_${fecha}_${horaSecudaria}.json`;
         
         // Preparar a la conexión de Express para escupir el binario hacia el entorno Windows como "Descargar"
@@ -51,7 +53,7 @@ router.get("/download", (req, res) => {
         
         const backupString = JSON.stringify({
           plataforma: "Sistema POS v1.0",
-          fecha_backup_hora: new Date().toLocaleString(),
+          fecha_backup_hora: d.toLocaleString('es-CO', { timeZone: 'America/Bogota' }),
           tablas_exportadas: tablas.length,
           datos: backupData
         }, null, 2); // 2 espacios identados para permitir que un informático pueda auditar el json si fuese requerido

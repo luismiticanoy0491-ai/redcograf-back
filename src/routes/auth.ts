@@ -58,7 +58,7 @@ router.post("/registro-empresa", async (req: any, res: any) => {
         const hash = await bcrypt.hash(password, salt);
 
         await dbConn.query(
-          "INSERT INTO usuarios_plataforma (empresa_id, username, password_hash, role) VALUES (?, ?, ?, 'dueño')",
+          "INSERT INTO usuarios_plataforma (empresa_id, username, password_hash, role, permisos) VALUES (?, ?, ?, 'admin', 'all')",
           [empresa_id, username, hash]
         );
 
@@ -168,13 +168,37 @@ router.post("/login", (req: any, res: any) => {
         return res.status(500).json({ error: "Error de configuración de seguridad." });
       }
 
+      // Determinar permisos efectivos (compatibilidad con usuarios previos)
+      let effectivePermisos = admin.permisos;
+      const isAdminRole = ['admin', 'superadmin', 'dueño'].includes(admin.role);
+      if (!effectivePermisos && isAdminRole) {
+        effectivePermisos = 'all';
+      }
+
       const token = jwt.sign(
-        { id: admin.id, role: admin.role, username: admin.username, empresa_id: admin.empresa_id, nombre_comercial: admin.nombre_comercial },
+        { 
+          id: admin.id, 
+          role: admin.role, 
+          username: admin.username, 
+          empresa_id: admin.empresa_id, 
+          nombre_comercial: admin.nombre_comercial,
+          cajero_id: admin.cajero_id,
+          permisos: effectivePermisos
+        },
         process.env.JWT_SECRET,
         { expiresIn: '8h' }
       );
 
-      res.json({ success: true, token, role: admin.role, username: admin.username, empresa_id: admin.empresa_id, nombre_comercial: admin.nombre_comercial });
+      res.json({ 
+        success: true, 
+        token, 
+        role: admin.role, 
+        username: admin.username, 
+        empresa_id: admin.empresa_id, 
+        nombre_comercial: admin.nombre_comercial,
+        cajero_id: admin.cajero_id,
+        permisos: effectivePermisos
+      });
     }
   );
 });

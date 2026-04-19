@@ -21,26 +21,43 @@ router.get("/", (req: any, res: any) => {
 // Actualizar configuración de la empresa del usuario
 router.put("/", (req: any, res: any) => {
   const empresa_id = req.user.empresa_id;
-  const { nombre_empresa, nit, direccion, telefono, correo, resolucion, representante_legal, logo } = req.body;
+  const { 
+    nombre_empresa, nit, direccion, telefono, correo, resolucion, representante_legal, logo,
+    tipo_persona, tipo_responsabilidad, regimen, municipio_codigo, departamento_codigo, ciudad, matricula_mercantil
+  } = req.body;
   
-  if (!nombre_empresa || !nit || !direccion || !correo || !resolucion) {
-    return res.status(400).json({ error: "Todos los campos obligatorios deben estar presentes" });
+  if (!nombre_empresa || !nit || !direccion || !correo) {
+    return res.status(400).json({ error: "Nombre, NIT, Dirección y Correo son obligatorios" });
   }
 
   const query = `
     UPDATE empresa_config 
-    SET nombre_empresa = ?, nit = ?, direccion = ?, telefono = ?, correo = ?, resolucion = ?, representante_legal = ?, logo = ?
+    SET nombre_empresa = ?, nit = ?, direccion = ?, telefono = ?, correo = ?, resolucion = ?, representante_legal = ?, logo = ?,
+        tipo_persona = ?, tipo_responsabilidad = ?, regimen = ?, municipio_codigo = ?, departamento_codigo = ?, ciudad = ?, matricula_mercantil = ?
     WHERE empresa_id = ?
   `;
   
-  connection.query(query, [nombre_empresa, nit, direccion, telefono || "", correo, resolucion, representante_legal || "", logo || null, empresa_id], (err, results: any) => {
+  connection.query(query, [
+    nombre_empresa, nit, direccion, telefono || "", correo, resolucion || "", representante_legal || "", logo || null,
+    tipo_persona || 'Persona Jurídica', tipo_responsabilidad || 'R-99-PN', regimen || 'Responsable de IVA', 
+    municipio_codigo || '05001', departamento_codigo || '05', ciudad || 'Medellín', matricula_mercantil || '',
+    empresa_id
+  ], (err, results: any) => {
     if (err) {
       console.error("Error al actualizar empresa_config:", err);
       return res.status(500).json({ error: err.message });
     }
     if (results.affectedRows === 0) {
-        const qInsert = `INSERT INTO empresa_config (empresa_id, nombre_empresa, nit, direccion, telefono, correo, resolucion, representante_legal, logo) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`;
-        connection.query(qInsert, [empresa_id, nombre_empresa, nit, direccion, telefono || "", correo, resolucion, representante_legal || "", logo || null], (errI) => {
+        const qInsert = `
+          INSERT INTO empresa_config 
+          (empresa_id, nombre_empresa, nit, direccion, telefono, correo, resolucion, representante_legal, logo, 
+           tipo_persona, tipo_responsabilidad, regimen, municipio_codigo, departamento_codigo, ciudad, matricula_mercantil) 
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+        connection.query(qInsert, [
+          empresa_id, nombre_empresa, nit, direccion, telefono || "", correo, resolucion || "", representante_legal || "", logo || null,
+          tipo_persona || 'Persona Jurídica', tipo_responsabilidad || 'R-99-PN', regimen || 'Responsable de IVA', 
+          municipio_codigo || '05001', departamento_codigo || '05', ciudad || 'Medellín', matricula_mercantil || ''
+        ], (errI) => {
             if (errI) {
                 console.error("Error al insertar empresa_config inicial:", errI);
                 return res.status(500).json({ error: "Error al crear configuración inicial" });

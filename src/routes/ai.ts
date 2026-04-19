@@ -153,9 +153,10 @@ router.get("/predicciones", verifyTokenAndTenant, async (req: any, res: any) => 
     if (dataGrafica.length > 0) {
       dataGrafica[dataGrafica.length - 1].proyectado = dataGrafica[dataGrafica.length - 1].real;
       const lastMonth = dataGrafica[dataGrafica.length - 1].mes;
-      const d = new Date(lastMonth + "-01");
-      d.setMonth(d.getMonth() + 1);
-      const nextMonth = d.toISOString().slice(0, 7) + " (Predicción)";
+      const [year, month] = lastMonth.split('-').map(Number);
+      const d = new Date(year, month, 1); // El mes en JS es 0-indexed, así que month (que es el siguiente número real) ya es el siguiente mes.
+      
+      const nextMonth = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')} (Predicción)`;
 
       dataGrafica.push({
         mes: nextMonth,

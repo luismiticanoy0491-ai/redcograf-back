@@ -11,7 +11,19 @@ const pool = mysql.createPool({
   port: Number(process.env.DB_PORT) || 3306,
   waitForConnections: true,
   connectionLimit: 10,
-  queueLimit: 0
+  queueLimit: 0,
+  timezone: "-05:00",
+  dateStrings: true, // Evita que el driver desplace las fechas al convertirlas a objetos Date
+  enableKeepAlive: true,
+  keepAliveInitialDelay: 10000,
+  connectTimeout: 20000
+});
+
+// Forzar zona horaria de la sesión en cada nueva conexión
+pool.on('connection', (connection: any) => {
+  connection.query("SET time_zone = '-05:00';", (err: any) => {
+    if (err) console.error("Error setting time_zone:", err);
+  });
 });
 
 // Test connection

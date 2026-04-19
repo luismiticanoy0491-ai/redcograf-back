@@ -21,9 +21,20 @@ router.get("/", async (req: any, res: any) => {
   try {
     const queryCajeros = `SELECT * FROM cajeros WHERE empresa_id = ?;`;
     const queryVentas = `
-      SELECT cajero_id, SUM(total) as total_ventas 
-      FROM facturas_venta 
-      WHERE empresa_id = ? AND MONTH(fecha) = ? AND YEAR(fecha) = ? 
+      SELECT cajero_id, SUM(comision) as total_comisiones
+      FROM (
+        SELECT f.cajero_id, v.comision
+        FROM ventas v
+        JOIN facturas_venta f ON v.factura_id = f.id
+        WHERE f.empresa_id = ? AND MONTH(f.fecha) = ? AND YEAR(f.fecha) = ?
+        
+        UNION ALL
+        
+        SELECT fe.cajero_id, ve.comision
+        FROM ventas_electronicas ve
+        JOIN facturas_electronicas fe ON ve.factura_electronica_id = fe.id
+        WHERE fe.empresa_id = ? AND MONTH(fe.fecha_emision) = ? AND YEAR(fe.fecha_emision) = ?
+      ) as t
       GROUP BY cajero_id;
     `;
     const queryPagos = `
@@ -32,18 +43,13 @@ router.get("/", async (req: any, res: any) => {
     `;
 
     const [cajeros] = await connection.promise().query(queryCajeros, [empresa_id]);
-    const [ventas] = await connection.promise().query(queryVentas, [empresa_id, mes, anio]);
+    const [ventas] = await connection.promise().query(queryVentas, [empresa_id, mes, anio, empresa_id, mes, anio]);
     const [pagos] = await connection.promise().query(queryPagos, [empresa_id, mes, anio]);
 
     const nomina = (cajeros as any[]).map(cajero => {
       const ventaCajero = (ventas as any[]).find(v => v.cajero_id === cajero.id);
-      const totalVentas = ventaCajero ? parseFloat(ventaCajero.total_ventas) : 0;
+      const comisiones = ventaCajero ? parseFloat(ventaCajero.total_comisiones) : 0;
       
-      let comisiones = 0;
-      if (cajero.paga_comisiones) {
-        comisiones = totalVentas * (parseFloat(cajero.porcentaje_comision) / 100);
-      }
-
       const salario_base = parseFloat(cajero.salario) || 0;
       const total_a_pagar = salario_base + comisiones;
 
@@ -55,7 +61,6 @@ router.get("/", async (req: any, res: any) => {
         nombre: cajero.nombre,
         documento: cajero.documento,
         salario_base,
-        totalVentas,
         porcentaje_comision: cajero.porcentaje_comision,
         comisiones,
         total_a_pagar,

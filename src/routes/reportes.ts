@@ -50,16 +50,24 @@ router.get("/dashboard", (req: any, res: any) => {
 
   const whereSQL = whereClauses.join(" AND ");
 
-  // Q1: Resumen General
   const q1 = `
     SELECT 
-      COALESCE(SUM(v.cantidad * v.precio_unitario), 0) as total_ingresos, 
-      COALESCE(SUM(v.cantidad * (v.precio_unitario - COALESCE(NULLIF(v.costo_unitario, 0), p.precio_compra, 0))), 0) as total_utilidad_global,
-      COUNT(DISTINCT f.id) as total_ventas 
-    FROM facturas_venta f
-    LEFT JOIN ventas v ON f.id = v.factura_id
-    LEFT JOIN productos p ON v.producto_id = p.id
-    WHERE ${whereSQL}
+      COALESCE(SUM(factura_total), 0) as total_ingresos, 
+      COALESCE(SUM(factura_utilidad), 0) as total_utilidad_global,
+      COALESCE(SUM(factura_iva), 0) as total_iva,
+      COUNT(DISTINCT factura_id) as total_ventas 
+    FROM (
+      SELECT 
+        f.id as factura_id,
+        f.iva as factura_iva,
+        SUM(v.cantidad * v.precio_unitario) as factura_total,
+        SUM(v.cantidad * (v.precio_unitario - COALESCE(NULLIF(v.costo_unitario, 0), p.precio_compra, 0))) as factura_utilidad
+      FROM facturas_venta f
+      LEFT JOIN ventas v ON f.id = v.factura_id
+      LEFT JOIN productos p ON v.producto_id = p.id
+      WHERE ${whereSQL}
+      GROUP BY f.id
+    ) as sub
   `;
   
   // Q2: TOP PRODUCTOS
@@ -155,5 +163,232 @@ router.get("/dashboard", (req: any, res: any) => {
   });
 });
 
+// --- NUEVO REPORTE DETALLADO DE PRODUCTOS VENDIDOS ---
+router.get("/productos-vendidos", (req: any, res: any) => {
+  const empresa_id = req.user.empresa_id;
+  const { cajeroId, categoria, startDate, endDate, es_servicio, page = 1, limit = 10 } = req.query;
+  
+  const offset = (parseInt(page) - 1) * parseInt(limit);
+
+  let whereClauses = ["f.empresa_id = ?"];
+  let params: any[] = [empresa_id];
+
+  if (cajeroId) {
+    whereClauses.push("f.cajero_id = ?");
+    params.push(cajeroId);
+  }
+  if (categoria) {
+    whereClauses.push("p.categoria = ?");
+    params.push(categoria);
+  }
+  if (es_servicio !== undefined && es_servicio !== "") {
+    whereClauses.push("p.es_servicio = ?");
+    params.push(es_servicio === 'true' || es_servicio === '1' ? 1 : 0);
+  }
+  if (startDate) {
+    whereClauses.push("f.fecha >= ?");
+    params.push(`${startDate} 00:00:00`);
+  }
+  if (endDate) {
+    whereClauses.push("f.fecha <= ?");
+    params.push(`${endDate} 23:59:59`);
+  }
+
+  const whereSQL = whereClauses.join(" AND ");
+
+  // Query for paginated data
+  const queryData = `
+    SELECT 
+      v.id as venta_id,
+      f.id as factura_id,
+      f.fecha,
+      c.nombre as cajero,
+      p.nombre as producto,
+      p.categoria as categoria,
+      v.cantidad,
+      v.precio_unitario,
+      v.comision,
+      cl.nombre as cliente,
+      f.cliente_id,
+      (v.cantidad * v.precio_unitario) as subtotal,
+      (v.cantidad * (v.precio_unitario - COALESCE(NULLIF(v.costo_unitario, 0), p.precio_compra, 0))) as utilidad
+    FROM ventas v
+    JOIN facturas_venta f ON v.factura_id = f.id
+    JOIN productos p ON v.producto_id = p.id
+    JOIN cajeros c ON f.cajero_id = c.id
+    LEFT JOIN clientes cl ON f.cliente_id = cl.id
+    WHERE ${whereSQL}
+    ORDER BY f.fecha DESC
+    LIMIT ? OFFSET ?
+  `;
+
+  // Query for total count
+  const queryCount = `
+    SELECT COUNT(*) as total
+    FROM ventas v
+    JOIN facturas_venta f ON v.factura_id = f.id
+    JOIN productos p ON v.producto_id = p.id
+    WHERE ${whereSQL}
+  `;
+
+  const runQuery = (query: string, queryParams: any[]) => {
+    return new Promise((resolve, reject) => {
+      connection.query(query, queryParams, (err, results) => {
+        if (err) reject(err);
+        else resolve(results);
+      });
+    });
+  };
+
+  Promise.all([
+    runQuery(queryData, [...params, parseInt(limit), offset]),
+    runQuery(queryCount, params)
+  ])
+  .then(([data, count]: any) => {
+    res.json({
+      data,
+      total: count[0].total,
+      page: parseInt(page),
+      last_page: Math.ceil(count[0].total / parseInt(limit))
+    });
+  })
+  .catch(err => {
+    console.error("Sold Products Report Error:", err);
+    res.status(500).json({ error: "Error al generar reporte de productos" });
+  });
+});
+
+// --- REPORTE DE PRODUCTOS PRÓXIMOS A VENCER (IA PREDICTIVA) ---
+router.get("/proximos-vencer", (req: any, res: any) => {
+  const empresa_id = req.user.empresa_id;
+  
+  // Seleccionamos productos con fecha de vencimiento en los próximos 30 días
+  const query = `
+    SELECT id, nombre, referencia, categoria, cantidad, fecha_vencimiento,
+           DATEDIFF(fecha_vencimiento, CURDATE()) as dias_faltantes
+    FROM productos
+    WHERE empresa_id = ? 
+      AND fecha_vencimiento IS NOT NULL 
+      AND fecha_vencimiento >= CURDATE()
+      AND fecha_vencimiento <= DATE_ADD(CURDATE(), INTERVAL 30 DAY)
+    ORDER BY fecha_vencimiento ASC
+  `;
+
+  connection.query(query, [empresa_id], (err, results) => {
+    if (err) {
+      console.error("Error fetching near expiry products:", err);
+      return res.status(500).json({ error: "Error al obtener productos por vencer" });
+    }
+    res.json(results);
+  });
+});
+
+import ExcelJS from "exceljs";
+
+// --- EXPORTAR REPORTE COMPLETO A EXCEL (.XLSX) ---
+router.get("/exportar-excel", (req: any, res: any) => {
+  const empresa_id = req.user.empresa_id;
+  const { cajeroId, categoria, startDate, endDate } = req.query;
+
+  let whereClauses = ["f.empresa_id = ?"];
+  let params: any[] = [empresa_id];
+
+  if (cajeroId) {
+    whereClauses.push("f.cajero_id = ?");
+    params.push(cajeroId);
+  }
+  if (categoria) {
+    whereClauses.push("p.categoria = ?");
+    params.push(categoria);
+  }
+  if (startDate) {
+    whereClauses.push("f.fecha >= ?");
+    params.push(`${startDate} 00:00:00`);
+  }
+  if (endDate) {
+    whereClauses.push("f.fecha <= ?");
+    params.push(`${endDate} 23:59:59`);
+  }
+
+  const whereSQL = whereClauses.join(" AND ");
+
+  const queryExcel = `
+    SELECT 
+      f.id as FACTURA,
+      DATE_FORMAT(f.fecha, '%Y-%m-%d %H:%i') as FECHA,
+      c.nombre as CAJERO,
+      p.nombre as PRODUCTO,
+      IF(f.cliente_id = 1, 'Mostrador / General', cl.nombre) as CLIENTE,
+      p.categoria as CATEGORIA,
+      v.cantidad as CANTIDAD,
+      v.precio_unitario as PRECIO_U,
+      v.comision as COMISION,
+      (v.cantidad * v.precio_unitario) as TOTAL_RECAUDADO,
+      (v.cantidad * (v.precio_unitario - COALESCE(NULLIF(v.costo_unitario, 0), p.precio_compra, 0))) as UTILIDAD
+    FROM ventas v
+    JOIN facturas_venta f ON v.factura_id = f.id
+    JOIN productos p ON v.producto_id = p.id
+    JOIN cajeros c ON f.cajero_id = c.id
+    LEFT JOIN clientes cl ON f.cliente_id = cl.id
+    WHERE ${whereSQL}
+    ORDER BY f.fecha DESC
+  `;
+
+  connection.query(queryExcel, params, async (err, results: any) => {
+    if (err) return res.status(500).json({ error: "Error al exportar" });
+    if (results.length === 0) return res.status(404).json({ error: "No hay datos para exportar" });
+
+    const workbook = new ExcelJS.Workbook();
+    const worksheet = workbook.addWorksheet("Reporte de Ventas");
+
+    // Definir columnas con estilos
+    worksheet.columns = [
+      { header: "FACTURA #", key: "FACTURA", width: 12 },
+      { header: "FECHA", key: "FECHA", width: 22 },
+      { header: "CAJERO", key: "CAJERO", width: 25 },
+      { header: "PRODUCTO", key: "PRODUCTO", width: 40 },
+      { header: "CLIENTE", key: "CLIENTE", width: 25 },
+      { header: "CATEGORÍA", key: "CATEGORIA", width: 20 },
+      { header: "CANTIDAD", key: "CANTIDAD", width: 12 },
+      { header: "PRECIO UNIT.", key: "PRECIO_U", width: 15 },
+      { header: "COMISIÓN ($)", key: "COMISION", width: 15 },
+      { header: "TOTAL RECAUDADO", key: "TOTAL_RECAUDADO", width: 18 },
+      { header: "UTILIDAD NETA", key: "UTILIDAD", width: 18 },
+    ];
+
+    // Estilo para el encabezado
+    worksheet.getRow(1).font = { bold: true, color: { argb: "FFFFFFFF" } };
+    worksheet.getRow(1).fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FF4F46E5" }, // Indigo 600
+    };
+    worksheet.getRow(1).alignment = { vertical: "middle", horizontal: "center" };
+
+    // Agregar filas
+    results.forEach((row: any) => {
+      worksheet.addRow(row);
+    });
+
+    // Formatear columnas de dinero
+    ["H", "I", "J", "K"].forEach(col => {
+      worksheet.getColumn(col).numFmt = '"$"#,##0';
+    });
+
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    );
+    res.setHeader(
+      "Content-Disposition",
+      "attachment; filename=Reporte_Ventas_Impulsa.xlsx"
+    );
+
+    await workbook.xlsx.write(res);
+    res.end();
+  });
+});
+
 export default router;
 export {};
+

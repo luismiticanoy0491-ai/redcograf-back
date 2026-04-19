@@ -9,7 +9,7 @@ router.use(verifyTokenAndTenant);
 
 router.post("/", async (req: any, res: any) => {
   const empresa_id = req.user.empresa_id;
-  const { items, metodoPago, cajeroId, clienteId, total, efectivoEntregado, transferenciaEntregada } = req.body;
+  const { items, metodoPago, cajeroId, clienteId, total, iva, efectivoEntregado, transferenciaEntregada, vuelto } = req.body;
   
   if (!items || items.length === 0) return res.status(400).json({ error: "Carrito vacío" });
 
@@ -27,15 +27,31 @@ router.post("/", async (req: any, res: any) => {
     );
     const permitirNegativoGlobal = configs && configs[0] ? !!configs[0].permitir_venta_negativa : true;
 
-    const cId = (cajeroId && !isNaN(parseInt(cajeroId))) ? parseInt(cajeroId) : null;
+    // Priorizamos el cajero_id del token (usuario logueado) para evitar selección manual errónea
+    const cId = req.user.cajero_id || ((cajeroId && !isNaN(parseInt(cajeroId))) ? parseInt(cajeroId) : null);
     const clId = (clienteId && !isNaN(parseInt(clienteId))) ? parseInt(clienteId) : null;
-    const pef = parseFloat(efectivoEntregado) || 0;
+
+    // --- NUEVO: Obtener porcentaje de comisión del cajero para desglose itemizado ---
+    let percComision = 0;
+    if (cId) {
+      const [cData]: any = await conn.query("SELECT paga_comisiones, porcentaje_comision FROM cajeros WHERE id = ?", [cId]);
+      if (cData.length > 0 && cData[0].paga_comisiones) {
+        percComision = parseFloat(cData[0].porcentaje_comision) || 0;
+      }
+    }
+    
+    // Cálculo de ingreso neto real en efectivo (restando el vuelto)
+    const vlt = parseFloat(vuelto) || 0;
+    const pefRaw = parseFloat(efectivoEntregado) || 0;
+    const pef = Math.max(0, pefRaw - vlt); 
     const ptr = parseFloat(transferenciaEntregada) || 0;
+    const ivaVal = Math.round((parseFloat(iva) || 0) * 100) / 100;
+    const totalVal = Math.round((parseFloat(total) || 0) * 100) / 100;
 
     // 1. Insertar Cabecera de Factura
     const [resCab]: any = await conn.query(
-      "INSERT INTO facturas_venta (empresa_id, cajero_id, cliente_id, total, metodo_pago, pago_efectivo, pago_transferencia) VALUES (?, ?, ?, ?, ?, ?, ?)",
-      [empresa_id, cId, clId, total, metodoPago, pef, ptr]
+      "INSERT INTO facturas_venta (empresa_id, cajero_id, cliente_id, total, iva, metodo_pago, pago_efectivo, pago_transferencia) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      [empresa_id, cId, clId, totalVal, ivaVal, metodoPago, pef, ptr]
     );
     const facturaId = resCab.insertId;
 
@@ -67,10 +83,14 @@ router.post("/", async (req: any, res: any) => {
         }
       }
 
-      // Insertar detalle de venta
+      // --- CÁLCULO DE COMISIÓN ITEMIZADA ---
+      const subtotalItem = item.precio_venta * item.qty;
+      const comisionItem = Math.round((subtotalItem * (percComision / 100)) * 100) / 100;
+
+      // Insertar detalle de venta con comisión calculada
       await conn.query(
-        "INSERT INTO ventas (empresa_id, factura_id, producto_id, cantidad, precio_unitario, costo_unitario) VALUES (?, ?, ?, ?, ?, ?)",
-        [empresa_id, facturaId, item.id, item.qty, item.precio_venta, producto.precio_compra || 0]
+        "INSERT INTO ventas (empresa_id, factura_id, producto_id, cantidad, precio_unitario, costo_unitario, comision) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [empresa_id, facturaId, item.id, item.qty, item.precio_venta, producto.precio_compra || 0, comisionItem]
       );
 
       // Actualizar Stock (Restar para productos, Sumar para servicios como acumulador de uso si fuera necesario, pero aquí restamos por defecto)
@@ -115,17 +135,57 @@ router.post("/", async (req: any, res: any) => {
 
 router.get("/", (req: any, res: any) => {
   const empresa_id = req.user.empresa_id;
-  const query = `
-    SELECT f.id, f.fecha, f.total, f.metodo_pago, f.pago_efectivo, f.pago_transferencia, c.nombre AS cajero, cl.nombre AS cliente, cl.telefono 
+  const page = parseInt(req.query.page as string) || 1;
+  const limit = parseInt(req.query.limit as string) || 20;
+  const offset = (page - 1) * limit;
+  const search = req.query.search as string || "";
+  const filtro = req.query.filtro as string || "Todas";
+
+  let whereClause = "WHERE f.empresa_id = ?";
+  const queryParams: any[] = [empresa_id];
+
+  if (search) {
+    whereClause += " AND (cl.nombre LIKE ? OR f.id LIKE ?)";
+    const searchPattern = `%${search}%`;
+    queryParams.push(searchPattern, searchPattern);
+  }
+
+  if (filtro === "Efectivo") {
+    whereClause += " AND f.metodo_pago = 'Efectivo'";
+  } else if (filtro === "Transferencia") {
+    whereClause += " AND f.metodo_pago = 'Transferencia'";
+  }
+
+  const countQuery = `
+    SELECT COUNT(*) as total 
+    FROM facturas_venta f
+    LEFT JOIN clientes cl ON f.cliente_id = cl.id
+    ${whereClause}
+  `;
+
+  const dataQuery = `
+    SELECT f.id, f.fecha, f.total, f.iva, f.metodo_pago, f.pago_efectivo, f.pago_transferencia, f.cliente_id, c.nombre AS cajero, cl.nombre AS cliente, cl.telefono 
     FROM facturas_venta f
     LEFT JOIN cajeros c ON f.cajero_id = c.id
     LEFT JOIN clientes cl ON f.cliente_id = cl.id
-    WHERE f.empresa_id = ?
+    ${whereClause}
     ORDER BY f.fecha DESC
+    LIMIT ? OFFSET ?
   `;
-  pool.query(query, [empresa_id], (err: any, results: any) => {
+
+  pool.query(countQuery, queryParams, (err: any, countRes: any) => {
     if (err) return res.status(500).json({ error: err.message });
-    res.json(results);
+    const total = countRes[0].total;
+
+    pool.query(dataQuery, [...queryParams, limit, offset], (err: any, results: any) => {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json({
+        data: results,
+        total: total,
+        page: page,
+        last_page: Math.ceil(total / limit)
+      });
+    });
   });
 });
 
@@ -146,7 +206,8 @@ router.get("/:id", (req: any, res: any) => {
 router.delete("/:id", async (req: any, res: any) => {
   const empresa_id = req.user.empresa_id;
   const facturaId = req.params.id;
-  const { motivo_anulacion, usuario_nombre } = req.body;
+  const { motivo_anulacion, usuario_nombre } = req.body || {};
+  const auditor_nombre = usuario_nombre || req.user.username || 'System';
 
   const promisePool = pool.promise();
   const conn = await promisePool.getConnection();
@@ -180,7 +241,7 @@ router.delete("/:id", async (req: any, res: any) => {
           const movType = esServicio ? 'ANULACIÓN_SERVICIO' : 'ANULACIÓN';
           await conn.query(
             "INSERT INTO kardex (producto_id, empresa_id, tipo_movimiento, cantidad_antes, cantidad_modificada, cantidad_despues, motivo, usuario_nombre, referencia) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [item.id, empresa_id, movType, stock_antes, item.cantidad, stock_despues, `Anulación: ${motivo_anulacion || 'Sin motivo'}`, usuario_nombre || 'Desconocido', `F-${facturaId}-ANUL`]
+            [item.producto_id, empresa_id, movType, stock_antes, item.cantidad, stock_despues, `Anulación: ${motivo_anulacion || 'Sin motivo'}`, auditor_nombre, `F-${facturaId}-ANUL`]
           );
         }
       }

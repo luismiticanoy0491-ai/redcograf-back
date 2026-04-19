@@ -17,15 +17,16 @@ router.get("/", (req: any, res: any) => {
 
 router.post("/", (req: any, res: any) => {
   const empresa_id = req.user.empresa_id;
-  const { nombre, documento, telefono, correo, direccion } = req.body;
+  const { nombre, documento, dv, tipo_documento, correo, direccion, telefono, correo_electronico_facturacion } = req.body;
+  
   if (!nombre) return res.status(400).json({ error: "Nombre es requerido" });
 
   connection.query(
-    "INSERT INTO clientes (empresa_id, nombre, documento, telefono, correo, direccion) VALUES (?, ?, ?, ?, ?, ?)",
-    [empresa_id, nombre, documento || '', telefono || '', correo || '', direccion || ''],
+    "INSERT INTO clientes (empresa_id, nombre, documento, dv, tipo_documento, correo, direccion, telefono, correo_electronico_facturacion) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    [empresa_id, nombre, documento || '', dv || null, tipo_documento || '13', correo || '', direccion || '', telefono || '', correo_electronico_facturacion || correo || ''],
     (err: any, results: any) => {
       if (err) return res.status(500).json({ error: err.message });
-      res.status(201).json({ id: results.insertId, empresa_id, nombre, documento, telefono, correo, direccion });
+      res.status(201).json({ id: results.insertId, ...req.body });
     }
   );
 });
@@ -41,19 +42,19 @@ router.delete("/:id", (req: any, res: any) => {
 router.put("/:id", (req: any, res: any) => {
   const empresa_id = req.user.empresa_id;
   const clienteId = req.params.id;
-  const { nombre, documento, telefono, correo, direccion } = req.body;
+  const { nombre, documento, dv, tipo_documento, correo, direccion, telefono, correo_electronico_facturacion } = req.body;
 
   if (!nombre) return res.status(400).json({ error: "Nombre es requerido" });
 
   const query = `
     UPDATE clientes 
-    SET nombre = ?, documento = ?, telefono = ?, correo = ?, direccion = ?
+    SET nombre = ?, documento = ?, dv = ?, tipo_documento = ?, correo = ?, direccion = ?, telefono = ?, correo_electronico_facturacion = ?
     WHERE id = ? AND empresa_id = ?
   `;
 
   connection.query(
     query,
-    [nombre, documento || '', telefono || '', correo || '', direccion || '', clienteId, empresa_id],
+    [nombre, documento || '', dv || null, tipo_documento || '13', correo || '', direccion || '', telefono || '', correo_electronico_facturacion || correo || '', clienteId, empresa_id],
     (err: any, results: any) => {
       if (err) return res.status(500).json({ error: err.message });
       if (results.affectedRows === 0) return res.status(404).json({ error: "Cliente no encontrado" });
