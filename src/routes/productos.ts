@@ -1,14 +1,14 @@
 import express from "express";
 import connection from "../conection";
-import { verifyTokenAndTenant } from "../middlewares/authMiddleware";
+import { verifyTokenAndTenant, verifyPermission } from "../middlewares/authMiddleware";
 
 const router = express.Router();
 
 // Todas las rutas de productos requieren autenticación y Tenant
 router.use(verifyTokenAndTenant);
 
-// Actualizar un producto existente
-router.put("/:id", async (req: any, res: any) => {
+// Actualizar un producto existente - Requiere permiso de inventario
+router.put("/:id", verifyPermission("inventario"), async (req: any, res: any) => {
   const { empresa_id, role, username } = req.user;
   const productoId = req.params.id;
   const { referencia, nombre, categoria, cantidad, precio_compra, porcentaje_ganancia, precio_venta, es_servicio, permitir_venta_negativa, iva_porcentaje, fecha_vencimiento } = req.body;
@@ -86,8 +86,8 @@ router.put("/:id", async (req: any, res: any) => {
   }
 });
 
-// Eliminar un producto con registro en Kardex (Trazabilidad)
-router.delete("/:id", async (req: any, res: any) => {
+// Eliminar un producto - Requiere permiso de inventario
+router.delete("/:id", verifyPermission("inventario"), async (req: any, res: any) => {
   const empresa_id = req.user.empresa_id;
   const productoId = req.params.id;
   const { motivo, usuario_nombre } = req.body;
@@ -211,8 +211,8 @@ router.get("/buscar/:referencia", (req: any, res: any) => {
   );
 });
 
-// Guardado de un producto individual
-router.post("/", (req: any, res: any) => {
+// Guardado de un producto individual - Requiere permiso de ingreso
+router.post("/", verifyPermission("ingreso"), (req: any, res: any) => {
   const empresa_id = req.user.empresa_id;
   const { referencia, nombre, categoria, cantidad, precio_compra, porcentaje_ganancia, precio_venta, es_servicio, permitir_venta_negativa, iva_porcentaje, fecha_vencimiento } = req.body;
   
@@ -274,8 +274,8 @@ router.post("/", (req: any, res: any) => {
   );
 });
 
-// Guardado en Lote (Batch) + Kardex
-router.post("/batch", async (req: any, res: any) => {
+// Guardado en Lote (Batch) - Requiere permiso de ingreso
+router.post("/batch", verifyPermission("ingreso"), async (req: any, res: any) => {
   const empresa_id = req.user.empresa_id;
   const productosData = req.body; 
   
@@ -354,8 +354,8 @@ router.post("/batch", async (req: any, res: any) => {
   }
 });
 
-// Ajuste rápido de inventario (Forzar Nueva Cantidad) + Kardex
-router.put("/:id/ajustar", async (req: any, res: any) => {
+// Ajuste rápido de inventario - Requiere permiso de ajustes
+router.put("/:id/ajustar", verifyPermission("ajustes"), async (req: any, res: any) => {
   const empresa_id = req.user.empresa_id;
   const productoId = req.params.id;
   const { nueva_cantidad, motivo, responsable } = req.body;

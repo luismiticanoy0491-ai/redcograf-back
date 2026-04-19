@@ -31,6 +31,48 @@ export const verifyTokenAndTenant = (req: any, res: any, next: any) => {
 };
 
 /**
+ * Middleware para validar permisos específicos por módulo.
+ * @param module Nombre del módulo a validar (ej: 'ingreso', 'ventas', 'reportes')
+ */
+export const verifyPermission = (module: string) => {
+  return (req: any, res: any, next: any) => {
+    // 1. Primero verificar que el token sea válido
+    verifyTokenAndTenant(req, res, () => {
+      const user = req.user;
+
+      // Superadmin o admins con 'all' tienen acceso total
+      if (user.role === 'superadmin' || user.permisos === 'all') {
+        return next();
+      }
+
+      // El dueño de la empresa (admin) usualmente tiene acceso total por defecto si permisos está vacío
+      if (user.role === 'admin' || user.role === 'dueño') {
+        if (!user.permisos || user.permisos === "" || user.permisos === "null") {
+          return next();
+        }
+      }
+
+      // Validar lista de permisos (JSON string en el token)
+      try {
+        const list = JSON.parse(user.permisos || "[]");
+        if (list.includes(module)) {
+          return next();
+        }
+      } catch (e) {
+        console.error("Error parsing user permissions in backend:", e);
+      }
+
+      // Si no tiene acceso
+      console.warn(`[INTENTO ACCESO NO AUTORIZADO]: Usuario ${user.username} (Empresa: ${user.empresa_id}) intentó acceder al módulo '${module}' sin permisos.`);
+      return res.status(403).json({ 
+        error: "🚫 No tienes permiso para realizar esta acción.",
+        detalle: `Se requiere acceso al módulo: ${module}`
+      });
+    });
+  };
+};
+
+/**
  * Middleware para rutas críticas de SuperAdministrador SaaS.
  * Restringe el acceso únicamente a usuarios con rol 'superadmin' 
  * que pertenezcan a la Empresa Matriz (ID 1).

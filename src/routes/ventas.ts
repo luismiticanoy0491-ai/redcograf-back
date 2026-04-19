@@ -1,13 +1,14 @@
 import express from "express";
 import pool from "../conection";
-import { verifyTokenAndTenant } from "../middlewares/authMiddleware";
+import { verifyTokenAndTenant, verifyPermission } from "../middlewares/authMiddleware";
 
 const router = express.Router();
 
-// Middleware de seguridad
+// Middleware de seguridad básico
 router.use(verifyTokenAndTenant);
 
-router.post("/", async (req: any, res: any) => {
+// Realizar una venta - Requiere permiso de venta
+router.post("/", verifyPermission("venta"), async (req: any, res: any) => {
   const empresa_id = req.user.empresa_id;
   const { items, metodoPago, cajeroId, clienteId, total, iva, efectivoEntregado, transferenciaEntregada, vuelto } = req.body;
   
@@ -133,7 +134,8 @@ router.post("/", async (req: any, res: any) => {
   }
 });
 
-router.get("/", (req: any, res: any) => {
+// Listar facturas de venta - Requiere permiso de facturas_venta
+router.get("/", verifyPermission("facturas_venta"), (req: any, res: any) => {
   const empresa_id = req.user.empresa_id;
   const page = parseInt(req.query.page as string) || 1;
   const limit = parseInt(req.query.limit as string) || 20;
@@ -203,7 +205,8 @@ router.get("/:id", (req: any, res: any) => {
   });
 });
 
-router.delete("/:id", async (req: any, res: any) => {
+// Anular factura - Requiere permiso de facturas_venta
+router.delete("/:id", verifyPermission("facturas_venta"), async (req: any, res: any) => {
   const empresa_id = req.user.empresa_id;
   const facturaId = req.params.id;
   const { motivo_anulacion, usuario_nombre } = req.body || {};
