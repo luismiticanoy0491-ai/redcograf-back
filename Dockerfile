@@ -1,8 +1,11 @@
 FROM node:20-alpine
 WORKDIR /app
 COPY package*.json ./
-RUN npm ci --only=production
-COPY dist ./dist
-COPY .env.production .env
+COPY package-lock.json ./
+RUN npm ci
+COPY tsconfig.json ./
+COPY src ./src
+RUN npm run build
+COPY .env.production ./
 EXPOSE 5010
 CMD ["node", "dist/server.js"]
