@@ -3,6 +3,6 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm ci --only=production
 COPY dist ./dist
-COPY .env .env
+COPY .env.production .env
 EXPOSE 5010
 CMD ["node", "dist/server.js"]
