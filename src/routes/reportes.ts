@@ -163,6 +163,52 @@ router.get("/dashboard", (req: any, res: any) => {
   });
 });
 
+// --- NUEVO: OBTENER CATEGORÍAS QUE TIENEN VENTAS REGISTRADAS ---
+router.get("/categorias-vendidas", (req: any, res: any) => {
+  const empresa_id = req.user.empresa_id;
+  const { cajeroId, startDate, endDate, es_servicio } = req.query;
+
+  let whereClauses = ["f.empresa_id = ?"];
+  let params: any[] = [empresa_id];
+
+  if (cajeroId) {
+    whereClauses.push("f.cajero_id = ?");
+    params.push(cajeroId);
+  }
+  if (es_servicio !== undefined && es_servicio !== "") {
+    whereClauses.push("p.es_servicio = ?");
+    params.push(es_servicio === 'true' || es_servicio === '1' ? 1 : 0);
+  }
+  if (startDate) {
+    whereClauses.push("f.fecha >= ?");
+    params.push(`${startDate} 00:00:00`);
+  }
+  if (endDate) {
+    whereClauses.push("f.fecha <= ?");
+    params.push(`${endDate} 23:59:59`);
+  }
+
+  const whereSQL = whereClauses.join(" AND ");
+
+  const query = `
+    SELECT DISTINCT p.categoria
+    FROM productos p
+    JOIN ventas v ON p.id = v.producto_id
+    JOIN facturas_venta f ON v.factura_id = f.id
+    WHERE ${whereSQL} AND p.categoria IS NOT NULL AND p.categoria != ''
+    ORDER BY p.categoria ASC
+  `;
+
+  connection.query(query, params, (err, results: any) => {
+    if (err) {
+      console.error("Error fetching sold categories:", err);
+      return res.status(500).json({ error: "Error al obtener categorías con ventas" });
+    }
+    const categorias = results.map((r: any) => r.categoria);
+    res.json(categorias);
+  });
+});
+
 // --- NUEVO REPORTE DETALLADO DE PRODUCTOS VENDIDOS ---
 router.get("/productos-vendidos", (req: any, res: any) => {
   const empresa_id = req.user.empresa_id;
